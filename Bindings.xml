@@ -1,0 +1,7 @@
+<Bindings>
+  <Binding name="CLICK LunaQuestItemButton:LeftButton" category="LUNAOBJTRACKER">
+  </Binding>
+  <Binding name="LUNAUITWEAKS_TOGGLE_TRACKER" category="LUNAOBJTRACKER">
+    LunaUITweaks_ToggleTracker()
+  </Binding>
+</Bindings>
