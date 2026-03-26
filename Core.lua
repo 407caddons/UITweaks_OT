@@ -69,6 +69,7 @@ local DEFAULTS = {
     showBackground = false,
     hideInCombat = false,
     hideInMPlus = false,
+    hideInRaid = false,
     autoTrackQuests = false,
     rightClickSuperTrack = true,
     shiftClickUntrack = true,

@@ -433,6 +433,17 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
         UpdateTracker()
     end)
 
+    local raidHideCheckbox = CreateFrame("CheckButton", "UIThingsTrackerRaidHideCheckbox", panel,
+        "ChatConfigCheckButtonTemplate")
+    raidHideCheckbox:SetPoint("TOPLEFT", 340, -485)
+    raidHideCheckbox:SetHitRectInsets(0, -70, 0, 0)
+    _G[raidHideCheckbox:GetName() .. "Text"]:SetText("Hide in Raid")
+    raidHideCheckbox:SetChecked(addonTable.db.hideInRaid)
+    raidHideCheckbox:SetScript("OnClick", function(self)
+        addonTable.db.hideInRaid = self:GetChecked()
+        UpdateTracker()
+    end)
+
     local restoreSuperTrackCheckbox = CreateFrame("CheckButton", "UIThingsTrackerRestoreSuperTrackCheckbox", panel,
         "ChatConfigCheckButtonTemplate")
     restoreSuperTrackCheckbox:SetPoint("TOPLEFT", 20, -485)

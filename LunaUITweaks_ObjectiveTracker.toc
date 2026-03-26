@@ -2,7 +2,7 @@
 ## Title: |cff00ff96Luna's UI Tweaks|r - Objective Tracker
 ## Notes: Custom objective tracker with quest/WQ/achievement tracking, super-track restore, and more.
 ## Author: 407c
-## Version: 1.0.1
+## Version: 1.0.2
 ## X-Curse-Project-ID: 1493891
 ## SavedVariables: LunaObjectiveTrackerDB
 ## OptionalDeps: LunaUITweaks

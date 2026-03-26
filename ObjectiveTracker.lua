@@ -18,6 +18,12 @@ local activeTimerBtns = {}   -- questID -> { btn, endTime }
 local trackerHiddenByKeybind = false
 local scenarioTimerEndTime = nil  -- set by WORLD_STATE_TIMER_START; used for scenario countdown
 
+-- Helper: check if we are in a raid instance
+local function IsInRaidInstance()
+    local _, instanceType = IsInInstance()
+    return instanceType == "raid"
+end
+
 -- Blizzard quest sound file IDs to mute when custom sounds are active
 local QUEST_SOUND_FILES = {
     567439, -- Sound/Interface/iQuestComplete.ogg
@@ -1109,7 +1115,8 @@ function addonTable.ObjectiveTracker.UpdateSettings()
             UnregisterStateDriver(trackerFrame, "visibility")
             trackerFrame:Show()
         end
-        if addonTable.db.hideInMPlus and C_ChallengeMode.IsChallengeModeActive() then
+        if (addonTable.db.hideInMPlus and C_ChallengeMode.IsChallengeModeActive())
+            or (addonTable.db.hideInRaid and IsInRaidInstance()) then
             trackerFrame:Hide()
         end
     end
@@ -1994,9 +2001,12 @@ UpdateContent = function()
 
     local inCombat = InCombatLockdown()
     local enabled = addonTable.db.enabled
-    local shouldHideMPlus = enabled and (addonTable.db.hideInMPlus and C_ChallengeMode.IsChallengeModeActive())
+    local shouldHideInstance = enabled and (
+        (addonTable.db.hideInMPlus and C_ChallengeMode.IsChallengeModeActive())
+        or (addonTable.db.hideInRaid and IsInRaidInstance())
+    )
 
-    if not enabled or shouldHideMPlus then
+    if not enabled or shouldHideInstance then
         if not inCombat then
             UnregisterStateDriver(trackerFrame, "visibility")
             trackerFrame:Hide()
