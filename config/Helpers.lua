@@ -1,13 +1,45 @@
 local addonName, addonTable = ...
 
+-- TWW's ChatConfigCheckButtonTemplate ships a $parentText FontString whose
+-- font/size/draw-layer state is unreliable for adjacent label use, so we
+-- create our own OVERLAY FontString with an explicit font object and hide the
+-- template's broken one. Cached on the button as _lunaLabel so repeated calls
+-- (e.g. on locale change) reuse the same FontString.
+local function SetCheckButtonLabel(cb, text)
+    if not cb._lunaLabel then
+        local label = cb:CreateFontString(nil, "OVERLAY")
+        label:SetFontObject("GameFontHighlight")
+        label:SetPoint("LEFT", cb, "RIGHT", 2, 1)
+        label:SetJustifyH("LEFT")
+        label:SetTextColor(1, 1, 1, 1)
+        cb._lunaLabel = label
+
+        local name = cb:GetName()
+        local templateText = (name and _G[name .. "Text"]) or cb.Text or cb.text
+        if templateText and templateText ~= label then
+            templateText:SetText("")
+            templateText:Hide()
+        end
+    end
+    cb._lunaLabel:SetText(text)
+    cb._lunaLabel:Show()
+    return cb._lunaLabel
+end
+
 -- If LunaUITweaks is loaded, use its helpers instead of this minimal set.
 if LunaUITweaksAPI and LunaUITweaksAPI.Helpers then
     addonTable.ConfigHelpers = LunaUITweaksAPI.Helpers
+    -- Main addon's helpers may pre-date this function; inject if missing so
+    -- TrackerPanel.lua can call it unconditionally.
+    if not addonTable.ConfigHelpers.SetCheckButtonLabel then
+        addonTable.ConfigHelpers.SetCheckButtonLabel = SetCheckButtonLabel
+    end
     return
 end
 
 addonTable.ConfigHelpers = {}
 local Helpers = addonTable.ConfigHelpers
+Helpers.SetCheckButtonLabel = SetCheckButtonLabel
 
 -- ============================================================
 -- Shared Utilities

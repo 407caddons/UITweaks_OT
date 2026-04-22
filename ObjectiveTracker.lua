@@ -859,8 +859,7 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
             if addonTable.db.showTooltipPreview and (questID or achieID or perksActivityID) then
                 btn:SetScript("OnEnter", function(self)
                     if self.questID then
-                        GameTooltip:SetOwner(self, "ANCHOR_NONE")
-                        GameTooltip:SetPoint("TOPLEFT", self, "TOPRIGHT", 5, 0)
+                        GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT", 5, 0)
                         GameTooltip:SetHyperlink("quest:" .. self.questID)
                         if IsInGroup() then
                             wipe(tooltipMembers)
@@ -891,13 +890,11 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                         end
                         GameTooltip:Show()
                     elseif self.achieID then
-                        GameTooltip:SetOwner(self, "ANCHOR_NONE")
-                        GameTooltip:SetPoint("TOPLEFT", self, "TOPRIGHT", 5, 0)
+                        GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT", 5, 0)
                         GameTooltip:SetHyperlink("achievement:" .. self.achieID)
                         GameTooltip:Show()
                     elseif self.perksActivityID then
-                        GameTooltip:SetOwner(self, "ANCHOR_NONE")
-                        GameTooltip:SetPoint("TOPLEFT", self, "TOPRIGHT", 5, 0)
+                        GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT", 5, 0)
                         local allActivities = C_PerksActivities.GetPerksActivitiesInfo()
                         if allActivities and allActivities.activities then
                             for _, activity in ipairs(allActivities.activities) do

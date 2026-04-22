@@ -1,7 +1,7 @@
 # LunaUITweaks — Objective Tracker
 
 Custom objective tracker addon with quest/WQ/achievement tracking, super-track restore, and more.
-Can run standalone or integrated with the main LunaUITweaks addon (shares settings via `UIThingsDB.tracker`).
+Runs standalone; when the main LunaUITweaks addon is present, registers its config panel as a tab in the main config window via `LunaUITweaksAPI.RegisterConfigPanel`. Settings are always stored in `LunaObjectiveTrackerDB` (no shared DB with the main addon).
 
 ## Target Environment
 

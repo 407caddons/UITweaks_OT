@@ -130,77 +130,29 @@ addonTable.db = nil
 local function OnEvent(self, event, loadedName)
     if event ~= "ADDON_LOADED" or loadedName ~= addonName then return end
 
-    local integratedWithMain = false
-
-    -- Always ensure our own saved variable exists for migration purposes.
+    -- Always use our own saved variable — main LunaUITweaks no longer owns the
+    -- tracker DB. Settings migrated from main's old UIThingsDB.tracker persist
+    -- here from prior sessions (they were continuously synced in older versions).
     LunaObjectiveTrackerDB = LunaObjectiveTrackerDB or {}
+    ApplyDefaults(LunaObjectiveTrackerDB, DEFAULTS)
+    addonTable.db = LunaObjectiveTrackerDB
 
-    -- If LunaUITweaks is loaded AND has tracker settings, use those (shared DB).
-    if UIThingsDB and UIThingsDB.tracker then
-        addonTable.db = UIThingsDB.tracker
-        integratedWithMain = true
-
-        -- Continuously sync settings into our own SavedVariable so they persist
-        -- if the user later disables LunaUITweaks and runs standalone.
-        -- Deep copy so color tables etc. are independent.
-        local function DeepCopy(src)
-            if type(src) ~= "table" then return src end
-            local copy = {}
-            for k, v in pairs(src) do
-                copy[k] = DeepCopy(v)
-            end
-            return copy
-        end
-        for k, v in pairs(UIThingsDB.tracker) do
-            LunaObjectiveTrackerDB[k] = DeepCopy(v)
-        end
-    else
-        -- Standalone mode: use own saved variable
-        ApplyDefaults(LunaObjectiveTrackerDB, DEFAULTS)
-        addonTable.db = LunaObjectiveTrackerDB
+    -- If the LunaUITweaks config API is available, inject our panel as a tab
+    -- in the main config window. Works the same way as the Chat History and
+    -- Unit Frames companions.
+    if LunaUITweaksAPI and LunaUITweaksAPI.RegisterConfigPanel
+       and addonTable.ConfigSetup and addonTable.ConfigSetup.Tracker then
+        LunaUITweaksAPI.RegisterConfigPanel(
+            "tracker",
+            "Tracker",
+            "Interface\\Icons\\Inv_Misc_Book_09",
+            addonTable.ConfigSetup.Tracker
+        )
     end
 
-    -- When integrated with LunaUITweaks, inject our ObjectiveTracker and ConfigSetup
-    -- into the main addon table so ConfigMain.lua and auto-lock logic find them.
-    if integratedWithMain then
-        local mainAddon = _G["LunaUITweaks"]
-        if mainAddon then
-            mainAddon.ObjectiveTracker = addonTable.ObjectiveTracker
-            mainAddon.ConfigSetup = mainAddon.ConfigSetup or {}
-            if addonTable.ConfigSetup and addonTable.ConfigSetup.Tracker then
-                mainAddon.ConfigSetup.Tracker = addonTable.ConfigSetup.Tracker
-            end
-        end
-    end
-
-    -- When integrated, sync settings to our SavedVariable on logout so changes
-    -- made during the session are preserved for standalone use.
-    if integratedWithMain then
-        self:RegisterEvent("PLAYER_LOGOUT")
-    else
-        self:UnregisterEvent("ADDON_LOADED")
-    end
+    self:UnregisterEvent("ADDON_LOADED")
 end
 
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("ADDON_LOADED")
-eventFrame:SetScript("OnEvent", function(self, event, ...)
-    if event == "ADDON_LOADED" then
-        OnEvent(self, event, ...)
-    elseif event == "PLAYER_LOGOUT" then
-        if UIThingsDB and UIThingsDB.tracker then
-            local function DeepCopy(src)
-                if type(src) ~= "table" then return src end
-                local copy = {}
-                for k, v in pairs(src) do
-                    copy[k] = DeepCopy(v)
-                end
-                return copy
-            end
-            LunaObjectiveTrackerDB = LunaObjectiveTrackerDB or {}
-            for k, v in pairs(UIThingsDB.tracker) do
-                LunaObjectiveTrackerDB[k] = DeepCopy(v)
-            end
-        end
-    end
-end)
+eventFrame:SetScript("OnEvent", OnEvent)

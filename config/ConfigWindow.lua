@@ -1,7 +1,8 @@
 local addonName, addonTable = ...
 
--- If LunaUITweaks is loaded, the tracker panel is registered via LunaUITweaksAPI.
--- This standalone config window is only used when running without LunaUITweaks.
+-- This config window owns the tracker's settings UI. The shared-DB integration
+-- with LunaUITweaks (UIThingsDB.tracker) is handled in Core.lua; the panel itself
+-- is always served from here.
 
 addonTable.Config = {}
 
@@ -105,10 +106,9 @@ local f = CreateFrame("Frame")
 f:RegisterEvent("PLAYER_LOGIN")
 f:SetScript("OnEvent", function(self)
     RegisterSlashCommands()
-    -- Initialize config lazily on first use, but register with Blizzard Settings now
-    if not (LunaUITweaksAPI and UIThingsDB and UIThingsDB.tracker) then
-        -- Standalone mode: initialize settings panel integration
-        addonTable.Config.Initialize()
-    end
+    -- Always register the Blizzard Settings category. The main addon no longer
+    -- hosts a tracker panel, so this addon owns its own config window in both
+    -- standalone and shared-DB modes.
+    addonTable.Config.Initialize()
     self:UnregisterAllEvents()
 end)
