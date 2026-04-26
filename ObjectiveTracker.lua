@@ -858,6 +858,7 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
 
             if addonTable.db.showTooltipPreview and (questID or achieID or perksActivityID) then
                 btn:SetScript("OnEnter", function(self)
+                    if GameTooltip:IsForbidden() then return end
                     if self.questID then
                         GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT", 5, 0)
                         GameTooltip:SetHyperlink("quest:" .. self.questID)
@@ -865,17 +866,18 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                             wipe(tooltipMembers)
                             local maxUnit = IsInRaid() and 40 or 4
                             local prefix = IsInRaid() and "raid" or "party"
+                            local Secret = addonTable.Secret
                             for i = 1, maxUnit do
                                 local unit = prefix .. i
                                 if UnitExists(unit) and not UnitIsUnit(unit, "player") then
                                     if C_QuestLog.IsUnitOnQuest(unit, self.questID) then
-                                        local name = UnitName(unit)
-                                        local _, class = UnitClass(unit)
-                                        local color = RAID_CLASS_COLORS[class]
-                                        if color and name then
-                                            table.insert(tooltipMembers, color:WrapTextInColorCode(name))
-                                        elseif name then
-                                            table.insert(tooltipMembers, name)
+                                        local name = Secret.SafeUnitName(unit)
+                                        if name then
+                                            local _, classEn = Secret.SafeUnitClass(unit)
+                                            local color = classEn and RAID_CLASS_COLORS[classEn]
+                                            local r, g, b = 1, 1, 1
+                                            if color then r, g, b = color.r, color.g, color.b end
+                                            table.insert(tooltipMembers, { name = name, r = r, g = g, b = b })
                                         end
                                     end
                                 end
@@ -883,8 +885,8 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                             if #tooltipMembers > 0 then
                                 GameTooltip:AddLine(" ")
                                 GameTooltip:AddLine("Party Members on Quest:")
-                                for _, name in ipairs(tooltipMembers) do
-                                    GameTooltip:AddLine("  " .. name)
+                                for _, m in ipairs(tooltipMembers) do
+                                    GameTooltip:AddLine(m.name, m.r, m.g, m.b)
                                 end
                             end
                         end
@@ -920,7 +922,9 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                         GameTooltip:Show()
                     end
                 end)
-                btn:SetScript("OnLeave", GameTooltip_Hide)
+                btn:SetScript("OnLeave", function()
+                    if not GameTooltip:IsForbidden() then GameTooltip:Hide() end
+                end)
             else
                 btn:SetScript("OnEnter", nil)
                 btn:SetScript("OnLeave", nil)
@@ -942,22 +946,45 @@ end
 -- EnableMouse(false) on the parent doesn't propagate to children — quest buttons
 -- and module frames are still clickable even when invisible. Recursively disable
 -- mouse on all Frame children so clicks pass through the hidden tracker.
+--
+-- Skip any subtree whose root name contains "Widget": UIWidgetObjectiveTracker
+-- and the WidgetContainer children of ScenarioObjectiveTracker / other modules
+-- hold frames pulled from the shared UIWidgetManager pool. Those same pool
+-- frames are later re-acquired for area-POI tooltip widgets (e.g. widget set
+-- 1846). Calling EnableMouse — or any method — on a pool frame leaves a
+-- taint marker that survives pool release/re-acquire and causes Blizzard's
+-- widget Setup() to fail with a secret-value arithmetic error on textHeight
+-- etc. Skipping by name keeps us off the pool entirely.
 local function DisableTrackerMouse(frame, depth)
     depth = depth or 0
     if depth > 10 then return end
+    local name = frame.GetName and frame:GetName()
+    if name and name:find("Widget") then return end
     frame:EnableMouse(false)
     for i = 1, frame:GetNumChildren() do
         DisableTrackerMouse(select(i, frame:GetChildren()), depth + 1)
     end
 end
 
--- Ticker: re-applies the disable after Blizzard dynamically adds new children
--- (e.g. when quest objectives update). Cancelled when the custom tracker is off.
+-- Ticker: keeps the Blizzard tracker visually hidden and mouse-disabled while
+-- the custom tracker is active. Runs every 0.5s, re-applying:
+--   * SetAlpha(0) and EnableMouse(false) on the top frame (visual-only calls,
+--     safe on Blizzard frames per project taint rules)
+--   * DisableTrackerMouse recursive child walk (catches new children Blizzard
+--     adds dynamically after quest/objective updates)
+--
+-- We deliberately do NOT hooksecurefunc(ObjectiveTrackerFrame, "Show", ...) to
+-- react to Blizzard re-showing the tracker. Frame-object hooksecurefunc on a
+-- Blizzard frame taints execution context and propagates secret-value errors
+-- (silverWidth / copperWidth in MoneyFrame, etc.) into Blizzard's secure
+-- tooltip chain. Polling at 0.5s costs nothing and keeps us off that path.
 local trackerMouseTicker = nil
 local function StartTrackerMouseTicker()
     if trackerMouseTicker then return end
-    trackerMouseTicker = C_Timer.NewTicker(2.0, function()
+    trackerMouseTicker = C_Timer.NewTicker(0.5, function()
         if ObjectiveTrackerFrame and addonTable.db and addonTable.db.enabled then
+            ObjectiveTrackerFrame:SetAlpha(0)
+            ObjectiveTrackerFrame:EnableMouse(false)
             DisableTrackerMouse(ObjectiveTrackerFrame)
         end
     end)
@@ -969,22 +996,6 @@ local function StopTrackerMouseTicker()
     end
 end
 
-local blizzardTrackerHooked = false
-local function HookBlizzardTracker()
-    if blizzardTrackerHooked or not ObjectiveTrackerFrame then return end
-    blizzardTrackerHooked = true
-    hooksecurefunc(ObjectiveTrackerFrame, "Show", function()
-        if addonTable.db and addonTable.db.enabled then
-            ObjectiveTrackerFrame:SetAlpha(0)
-            ObjectiveTrackerFrame:EnableMouse(false)
-            DisableTrackerMouse(ObjectiveTrackerFrame)
-            StartTrackerMouseTicker()
-        end
-    end)
-end
-
-HookBlizzardTracker()
-
 -- ============================================================
 -- Tracker frame setup
 -- ============================================================
@@ -992,7 +1003,7 @@ local function SetupCustomTracker()
     if trackerFrame then return end
     local settings = addonTable.db
 
-    trackerFrame = CreateFrame("Frame", "UIThingsTrackerFrame", UIParent, "BackdropTemplate")
+    trackerFrame = CreateFrame("Frame", "UIThingsTrackerFrame", UIParent, "BackdropTemplate,SecureHandlerStateTemplate")
     trackerFrame:SetMovable(true)
     trackerFrame:SetResizable(true)
     trackerFrame:SetClampedToScreen(true)
@@ -1074,7 +1085,6 @@ function addonTable.ObjectiveTracker.UpdateSettings()
     local enabled = addonTable.db.enabled
 
     if enabled then
-        HookBlizzardTracker()
         if ObjectiveTrackerFrame then
             ObjectiveTrackerFrame:SetAlpha(0)
             ObjectiveTrackerFrame:EnableMouse(false)
@@ -2210,10 +2220,13 @@ SetupTrackerEvents = function()
                 UpdateQuestItemButton()
             end
             UpdateContent()
-        elseif event == "CHALLENGE_MODE_START" then
-            if addonTable.db.hideInMPlus then trackerFrame:Hide() end
-        elseif event == "CHALLENGE_MODE_COMPLETED" or event == "CHALLENGE_MODE_RESET" then
-            if addonTable.db.hideInMPlus then trackerFrame:Show() end
+        elseif event == "CHALLENGE_MODE_START"
+            or event == "CHALLENGE_MODE_COMPLETED"
+            or event == "CHALLENGE_MODE_RESET" then
+            -- Direct Hide/Show on a SecureHandlerStateTemplate frame is blocked
+            -- in combat. UpdateContent reads C_ChallengeMode.IsChallengeModeActive()
+            -- and applies the correct visibility (skipping when in combat); the
+            -- following PLAYER_REGEN_ENABLED then re-runs UpdateContent.
             ScheduleUpdateContent()
         elseif event == "SUPER_TRACKING_CHANGED" then
             HandleSuperTrackChanged()
@@ -2299,14 +2312,12 @@ local hookFrame = CreateFrame("Frame")
 hookFrame:RegisterEvent("PLAYER_LOGIN")
 hookFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 hookFrame:SetScript("OnEvent", function(self, event)
-    HookBlizzardTracker()
-    if blizzardTrackerHooked then
-        if addonTable.db and addonTable.db.enabled and ObjectiveTrackerFrame then
-            ObjectiveTrackerFrame:SetAlpha(0)
-            ObjectiveTrackerFrame:EnableMouse(false)
-            DisableTrackerMouse(ObjectiveTrackerFrame)
-            StartTrackerMouseTicker()
-        end
-        self:UnregisterAllEvents()
+    if not ObjectiveTrackerFrame then return end
+    if addonTable.db and addonTable.db.enabled then
+        ObjectiveTrackerFrame:SetAlpha(0)
+        ObjectiveTrackerFrame:EnableMouse(false)
+        DisableTrackerMouse(ObjectiveTrackerFrame)
+        StartTrackerMouseTicker()
     end
+    self:UnregisterAllEvents()
 end)

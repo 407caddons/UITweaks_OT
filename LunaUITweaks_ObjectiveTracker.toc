@@ -2,13 +2,16 @@
 ## Title: |cff00ff96Luna's UI Tweaks|r - Objective Tracker
 ## Notes: Custom objective tracker with quest/WQ/achievement tracking, super-track restore, and more.
 ## Author: 407c
-## Version: 1.0.2
+## Version: 1.0.3
 ## X-Curse-Project-ID: 1493891
 ## SavedVariables: LunaObjectiveTrackerDB
 ## OptionalDeps: LunaUITweaks
 ## IconTexture: Interface\AddOns\LunaUITweaks\Icon.tga
 
 ## Category: User Interface
+
+# Secret-value helpers for TWW 12.0+ (must load first so all modules can use it)
+utils\Secret.lua
 
 # Core (defaults, utilities, integration detection)
 Core.lua
