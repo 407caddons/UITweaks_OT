@@ -5,6 +5,8 @@ local SafeAfter = addonTable.Core and addonTable.Core.SafeAfter or function(dela
     C_Timer.After(delay, function() local ok, err = pcall(func) if not ok then print("|cffff0000LunaUITweaks error:|r " .. tostring(err)) end end)
 end
 
+local Secret = addonTable.Secret
+
 local trackerFrame
 local scrollFrame
 local scrollChild
@@ -866,7 +868,6 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                             wipe(tooltipMembers)
                             local maxUnit = IsInRaid() and 40 or 4
                             local prefix = IsInRaid() and "raid" or "party"
-                            local Secret = addonTable.Secret
                             for i = 1, maxUnit do
                                 local unit = prefix .. i
                                 if UnitExists(unit) and not UnitIsUnit(unit, "player") then
@@ -887,6 +888,70 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                                 GameTooltip:AddLine("Party Members on Quest:")
                                 for _, m in ipairs(tooltipMembers) do
                                     GameTooltip:AddLine(m.name, m.r, m.g, m.b)
+                                end
+                            end
+                        end
+                        local showedChain = false
+                        if C_CampaignInfo and C_CampaignInfo.GetCampaignID then
+                            local campaignID = C_CampaignInfo.GetCampaignID(self.questID)
+                            if campaignID and campaignID > 0 then
+                                local info = C_CampaignInfo.GetCampaignInfo and C_CampaignInfo.GetCampaignInfo(campaignID)
+                                local chapterIDs = info and info.chapterIDs
+                                if chapterIDs and #chapterIDs > 0 then
+                                    local currentChapterID = C_CampaignInfo.GetCurrentChapterID and C_CampaignInfo.GetCurrentChapterID(campaignID)
+                                    GameTooltip:AddLine(" ")
+                                    GameTooltip:AddLine(((info and info.name) or "Campaign") .. " Chapters:")
+                                    for _, cid in ipairs(chapterIDs) do
+                                        local chapter = C_CampaignInfo.GetCampaignChapterInfo and C_CampaignInfo.GetCampaignChapterInfo(cid)
+                                        if chapter and chapter.name then
+                                            local r, g, b
+                                            if chapter.isComplete then
+                                                r, g, b = 0, 1, 0
+                                            elseif cid == currentChapterID then
+                                                r, g, b = 1, 1, 0
+                                            else
+                                                r, g, b = 1, 0.2, 0.2
+                                            end
+                                            GameTooltip:AddLine("  " .. chapter.name, r, g, b)
+                                        end
+                                    end
+                                    showedChain = true
+                                end
+                            end
+                        end
+                        if not showedChain and C_QuestLine and C_QuestLine.GetQuestLineInfo and C_QuestLine.GetQuestLineQuests then
+                            local quMap = GetQuestUiMapID and GetQuestUiMapID(self.questID) or 0
+                            local plMap = C_Map and C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player") or 0
+                            local mapID = (quMap and quMap > 0) and quMap or plMap
+                            local lineInfo = mapID > 0 and C_QuestLine.GetQuestLineInfo(self.questID, mapID) or nil
+                            if not lineInfo and plMap > 0 and plMap ~= mapID then
+                                lineInfo = C_QuestLine.GetQuestLineInfo(self.questID, plMap)
+                            end
+                            local lineQuests = lineInfo and lineInfo.questLineID and C_QuestLine.GetQuestLineQuests(lineInfo.questLineID)
+                            if lineQuests and #lineQuests > 0 then
+                                local currentIdx
+                                for i, qID in ipairs(lineQuests) do
+                                    if qID == self.questID then currentIdx = i; break end
+                                end
+                                GameTooltip:AddLine(" ")
+                                GameTooltip:AddLine((lineInfo.questLineName or "Quest Line") .. ":")
+                                for i, qID in ipairs(lineQuests) do
+                                    local title = C_QuestLog.GetTitleForQuestID and C_QuestLog.GetTitleForQuestID(qID)
+                                    if (not title or title == "") and C_QuestLog.RequestLoadQuestByID then
+                                        C_QuestLog.RequestLoadQuestByID(qID)
+                                        title = "Quest " .. qID
+                                    end
+                                    local isFlaggedDone = C_QuestLog.IsQuestFlaggedCompleted and C_QuestLog.IsQuestFlaggedCompleted(qID)
+                                    local isOn = C_QuestLog.IsOnQuest and C_QuestLog.IsOnQuest(qID)
+                                    local r, g, b
+                                    if qID == self.questID or isOn then
+                                        r, g, b = 1, 1, 0
+                                    elseif isFlaggedDone or (currentIdx and i < currentIdx) then
+                                        r, g, b = 0, 1, 0
+                                    else
+                                        r, g, b = 1, 0.2, 0.2
+                                    end
+                                    GameTooltip:AddLine("  " .. title, r, g, b)
                                 end
                             end
                         end
@@ -1597,7 +1662,8 @@ local function RenderScenarios()
     if stepInfo and stepInfo.description and stepInfo.description ~= "" then
         AddLine("|cFFBBBBBB" .. stepInfo.description .. "|r", false, nil, nil, true)
     end
-    if stepInfo and stepInfo.weightedProgress and stepInfo.weightedProgress > 0 then
+    if stepInfo and stepInfo.weightedProgress and Secret.CanAccessValue(stepInfo.weightedProgress)
+        and stepInfo.weightedProgress > 0 then
         local pct = math.floor(stepInfo.weightedProgress)
         local color = pct >= 100 and "00FF00" or "FFFF00"
         AddLine(string.format("|cFF%s%d%% Complete|r", color, pct), false, nil, nil, true)
@@ -1612,7 +1678,10 @@ local function RenderScenarios()
         if text == "" then return true end
         if criteriaInfo.isWeightedProgress then
             if criteriaInfo.quantity then text = text .. " " .. criteriaInfo.quantity .. "%" end
-        elseif criteriaInfo.quantity and criteriaInfo.totalQuantity and criteriaInfo.totalQuantity > 1 then
+        elseif criteriaInfo.quantity and criteriaInfo.totalQuantity
+            and Secret.CanAccessValue(criteriaInfo.quantity)
+            and Secret.CanAccessValue(criteriaInfo.totalQuantity)
+            and criteriaInfo.totalQuantity > 1 then
             text = text .. " (" .. criteriaInfo.quantity .. "/" .. criteriaInfo.totalQuantity .. ")"
         end
         if criteriaInfo.failed then text = "|cFFFF0000" .. text .. " (Failed)|r"
@@ -1642,7 +1711,9 @@ local function RenderScenarios()
         -- Method 1: step countdown via C_Scenario.GetStepInfo (pre-TWW API, may still exist)
         if not placed and C_Scenario and C_Scenario.GetStepInfo then
             local ok, _, _, _, _, _, elap, dur = pcall(C_Scenario.GetStepInfo)
-            if ok and type(dur) == "number" and dur > 0 and type(elap) == "number" then
+            if ok and type(dur) == "number" and type(elap) == "number"
+                and Secret.CanAccessValue(dur) and Secret.CanAccessValue(elap)
+                and dur > 0 then
                 local remaining = dur - elap
                 if remaining > 0 and remaining <= 3600 then
                     PlaceTimerLine("scenario", remaining)
@@ -1654,7 +1725,9 @@ local function RenderScenarios()
         if not placed and stepInfo then
             local dur = stepInfo.duration or stepInfo.timeLimit
             local elap = stepInfo.elapsedTime or stepInfo.elapsed
-            if type(dur) == "number" and dur > 0 and type(elap) == "number" then
+            if type(dur) == "number" and type(elap) == "number"
+                and Secret.CanAccessValue(dur) and Secret.CanAccessValue(elap)
+                and dur > 0 then
                 local remaining = dur - elap
                 if remaining > 0 and remaining <= 3600 then
                     PlaceTimerLine("scenario", remaining)
@@ -1669,6 +1742,8 @@ local function RenderScenarios()
                 for _, w in ipairs(widgets) do
                     local ti = C_UIWidgetManager.GetScenarioHeaderTimerWidgetVisualizationInfo(w.widgetID)
                     if ti and ti.shownState == 1 and type(ti.timerValue) == "number"
+                        and Secret.CanAccessValue(ti.timerValue)
+                        and Secret.CanAccessValue(ti.timerMin or 0)
                         and ti.timerValue > (ti.timerMin or 0) then
                         PlaceTimerLine("scenario", ti.timerValue)
                         placed = true
@@ -1688,9 +1763,9 @@ local function RenderScenarios()
         -- Method 5: world elapsed timer (fallback: count up when no total duration known)
         if not placed and GetWorldElapsedTimers then
             local numTimers = GetWorldElapsedTimers()
-            if type(numTimers) == "number" and numTimers > 0 then
+            if type(numTimers) == "number" and Secret.CanAccessValue(numTimers) and numTimers > 0 then
                 local _, elap = GetWorldElapsedTimer(1)
-                if type(elap) == "number" and elap >= 0 then
+                if type(elap) == "number" and Secret.CanAccessValue(elap) and elap >= 0 then
                     PlaceElapsedLine("scenario", elap)
                 end
             end
@@ -2248,7 +2323,7 @@ SetupTrackerEvents = function()
             ScheduleUpdateContent()
         elseif event == "WORLD_STATE_TIMER_START" then
             local timerType, timeRemaining, totalTime = ...
-            if type(timeRemaining) == "number" and timeRemaining > 0 then
+            if type(timeRemaining) == "number" and Secret.CanAccessValue(timeRemaining) and timeRemaining > 0 then
                 scenarioTimerEndTime = GetTime() + timeRemaining
             end
         elseif event == "WORLD_STATE_TIMER_STOP" then
