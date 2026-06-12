@@ -1,0 +1,87 @@
+# WoW Lua Code Review — 2026-04-28
+
+## Critical (would cause errors or taint in-game)
+
+- **ObjectiveTracker.lua:1163** — `ObjectiveTrackerFrame:SetScale(1)` on a Blizzard frame in the disable branch of `UpdateSettings`. The project's documented safe-call whitelist for Blizzard frames is `SetAlpha`/`SetHeight`/`EnableMouse` only — `SetScale` changes layout metrics and taints the layout context the same way `SetPoint`/`SetSize` do. The enable path never sets scale (only alpha+mouse), so the disable path is also asymmetric. Remove the call; if the user toggles the addon off, the Blizzard tracker should keep whatever scale it had.
+
+- **ObjectiveTracker.lua:1167** — `trackerFrame:Hide()` in the `UpdateSettings` disable branch has no `InCombatLockdown()` guard. `trackerFrame` inherits `SecureHandlerStateTemplate`, so `Hide` on it during combat produces `ADDON_ACTION_BLOCKED`. `UpdateSettings` is invoked from `UpdateTracker()` in every config checkbox `OnClick` (`TrackerPanel.lua`) — the user can uncheck "Enable Objective Tracker Tweaks" mid-fight. Wrap with `if not InCombatLockdown() then trackerFrame:Hide() end` or register a `"hide"` state driver once combat ends.
+
+- **ObjectiveTracker.lua:1196-1197** — `trackerFrame:SetSize(...)` and `trackerFrame:SetFrameStrata(...)` are called outside the `if not inCombat` guard at line 1183. Both methods are combat-restricted on a `SecureHandlerStateTemplate` frame and will be blocked. Any setting change during combat (slider, checkbox) reaches this code via `UpdateTracker` → `UpdateSettings`. Move both calls inside the existing combat-gated block, or wrap with their own `InCombatLockdown()` guard.
+
+- **ObjectiveTracker.lua:1108-1116** — `OnDragStop` calls `self:ClearAllPoints()` and `self:SetPoint(...)` without an `InCombatLockdown()` guard. The frame is `SecureHandlerStateTemplate`, so both methods are blocked in combat. Combat starting mid-drag (frame is unlocked, mouse held down) will trip this. Guard the re-anchor block; if blocked, defer the position write to `PLAYER_REGEN_ENABLED`.
+
+- **ObjectiveTracker.lua:1192** — `trackerFrame:Hide()` for `hideInMPlus`/`hideInRaid` runs *after* `RegisterStateDriver(trackerFrame, "visibility", "[combat] hide; show")` was just registered (line 1185). The state-driver system will re-evaluate the moment the player drops combat and re-apply `show`, undoing the explicit `:Hide()`. The user will see the tracker reappear in M+/raid whenever they're out of combat. Build a combined macro string that factors in M+/raid (e.g. `"[combat] hide; [group:raid] hide; hide"` when both are set), or unregister + re-register with the right macro instead of stacking `Hide()` on top of an active driver.
+
+- **Core.lua:112-121** — `ApplyDefaults` assigns color tables (which have `.r`) by *reference* via the `elseif db[key] == nil then db[key] = value` branch. After ADDON_LOADED, `addonTable.db.sectionHeaderColor` IS `Core.DEFAULTS.tracker.sectionHeaderColor`. The color-picker handlers in `TrackerPanel.lua:886-906` etc. mutate the shared color table fields, which writes through to the in-memory defaults. Effect: `Helpers.CreateResetButton`'s `OnAccept` (Helpers.lua:119-133) deep-copies from defaults, but defaults have already been corrupted by the picker — "Reset to Defaults" resets to the *current* values, not the originals. Fix by deep-copying every leaf of `defaults` (including color tables) when seeding `db`, not aliasing.
+
+- **ObjectiveTracker.lua:175-230 (`AcquireItem`)** — The pool can grow during combat, which creates a `Button "SecureActionButtonTemplate"` (line 203) and calls `SetFrameLevel` on it (line 207). `CreateFrame` on a secure template and `SetFrameLevel` on a protected button are combat-restricted; this fires from any quest/scenario event that hits `UpdateContent` while in combat (e.g. `QUEST_LOG_UPDATE`, `SCENARIO_CRITERIA_UPDATE`). On the first update of a long combat encounter where the pool is exhausted, this will throw `ADDON_ACTION_BLOCKED`. Pre-allocate a reasonable pool size at login outside combat, or skip pool growth in combat (early-return with a placeholder line) and grow once `PLAYER_REGEN_ENABLED` fires.
+
+## Warning (likely bugs or violations)
+
+- **ObjectiveTracker.lua:1402-1440 + sectionRenderers:2072** — "Temporary Objectives" is rendered inline at the top of `RenderQuests` (lines 1413-1440), but `sectionRenderers.tempObjectives = function() end` is a no-op. The user sees a `tempObjectives` entry in the section-order config (`TrackerPanel.lua:90,113,121` and `Core.lua:54-61` defaults), can move it up/down, but reordering has zero visual effect because the actual rendering is bolted onto `quests`. Either factor the temp-objectives rendering into a real `RenderTempObjectives` function the renderer table dispatches to, or remove `tempObjectives` from the user-visible section list (and from defaults).
+
+- **ObjectiveTracker.lua:130-138 (and OnAchieveClick at 154-160)** — Left-click handlers call `QuestMapFrame_OpenToQuestDetails` / `ToggleQuestLog` / `AchievementFrame_ToggleAchievementFrame` / `AchievementFrame_SelectAchievement`. These touch Blizzard's protected UI panel stack and can spawn `UIParent_ManageFramePositions` taint downstream because the panel-show path inherits the addon-tainted execution context. `not InCombatLockdown()` is insufficient — the taint is lexical, not combat-gated. Defer with `C_Timer.After(0, function() ... end)` so at least the call isn't directly on the click-execution stack.
+
+- **ObjectiveTracker.lua:1505-1513 (autoComplete inside RenderSingleQuest)** — `AddLine` was called with `questID`, so it wired `OnQuestClick` (line 731-732). Then `completeBtn:SetScript("OnClick", function ... ShowQuestComplete(qid) end)` immediately replaces that handler. The autoComplete row therefore loses ctrl-untrack / shift-link / right-click super-track / middle-click share. Likely fine since this is a terminal "click to complete" action, but it's surprising and should be commented or restructured.
+
+- **ObjectiveTracker.lua:416-448 (`questLineCache`)** — Cache entries get an `expiry` but are only re-read on hit; nothing ever prunes expired entries. Over a multi-hour session many distinct `questID`s accumulate `{ str = "", expiry = ... }` table allocations that never get collected. Either prune on a coarse timer or key the cache by `(questID, mapID)` and clear on `ZONE_CHANGED_NEW_AREA`.
+
+- **ObjectiveTracker.lua:1255-1259, 1268-1287** — Distance ticker and timer ticker are both cancelled and recreated on every `UpdateSettings` call. `UpdateSettings` runs on every config checkbox click (`UpdateTracker` → `UpdateSettings`). Rapid user toggling produces a steady churn of `C_Timer.NewTicker` allocations and cancellations. Move ticker lifecycle into dedicated `Start*Ticker`/`Stop*Ticker` functions that only cycle the ticker when the relevant setting actually changed.
+
+- **ObjectiveTracker.lua:1255-1260 (distance ticker)** — On `interval = 1` the ticker fires `UpdateContent()` every second, which rebuilds every line, re-acquires every button, re-points every `ItemBtn`, re-queries `GetDistanceSqToQuest` for every quest. That is far more than needed — only the distance suffix on existing lines needs updating. A focused "update distances only" pass would scan `itemPool` for `released == false` entries with a `questID`, recompute `GetDistanceString`, and rewrite the suffix without disturbing layout.
+
+- **ObjectiveTracker.lua:1023-1032 + ticker at 1049-1055** — `DisableTrackerMouse` walks `ObjectiveTrackerFrame` recursively (depth ≤ 10), and the 0.5 s ticker runs that walk plus `SetAlpha(0)` + `EnableMouse(false)` continuously while the addon is enabled (i.e. permanently). The recursion does `frame:GetNumChildren() + select(i, frame:GetChildren())` allocations on every tick. A name-based cache of "already-walked" subtrees keyed by frame ref, invalidated on `ZONE_CHANGED_NEW_AREA` and on Blizzard tracker updates, would amortise this dramatically.
+
+- **ObjectiveTracker.lua:2152-2174 + TrackerPanel.lua:97-115** — `sectionOrderList` migration ("ensure travelersLog exists, ensure campaignQuests exists, dedupe") runs in *both* `UpdateContent` (every render) and `TrackerPanel.lua` setup. Duplication invites drift and runs the same migration on every render. Move it once into `Core.lua` after `ApplyDefaults`.
+
+- **ObjectiveTracker.lua:1095-1098** — `if settings.hideHeader then headerFrame_:SetHeight(1); headerFrame_:Hide()`. `SetHeight(1)` immediately before `Hide()` is redundant — a hidden frame has no visual size. Drop the `SetHeight` call.
+
+- **TrackerPanel.lua:51-56 vs. 188, 199, 210, 221, 254, 308, 319, 330, 341, 352, 363, 374, 385, 396, …** — `enableTrackerBtn` uses `not not self:GetChecked()` to coerce `1`/nil into `true`/false; ~20 other handlers just do `addonTable.db.X = self:GetChecked()` and store `1` for checked. SetChecked accepts both, so visually fine, but type-mixed booleans in the saved-vars file are sloppy. Pick one (the `not not` form) and apply it everywhere.
+
+- **ObjectiveTracker.lua:1190-1193** — `C_ChallengeMode.IsChallengeModeActive()` and `IsInRaidInstance()` calls inside the `if not inCombat` block are fine, but the `trackerFrame:Hide()` on the next line races against the `RegisterStateDriver` set up just above. Already flagged in Critical above; restating because the order means a user toggling "hide in raid" while in raid sees the tracker briefly disappear, then re-appear when they leave combat.
+
+## Minor (style, performance, clarity)
+
+- **Core.lua:4** — `addonTable.ObjectiveTracker = {}` is overwritten by `ObjectiveTracker.lua:2`. Remove one (prefer keeping it in `ObjectiveTracker.lua` since that's where the table is populated).
+
+- **Core.lua:18-23 (`SafeAfter`)** — `pcall(C_Timer.After, delay, func)` only catches scheduling errors; a `func` that errors when fired still bubbles. The fallback at `ObjectiveTracker.lua:4-6` correctly wraps the callback in `pcall`. Make `Core.SafeAfter` match (or drop the pcall — Blizzard's default handler is fine).
+
+- **ObjectiveTracker.lua:4-6** — Dead fallback: `Core.lua` is in the TOC before `ObjectiveTracker.lua`, so `addonTable.Core.SafeAfter` is always defined. Drop the local fallback and use `addonTable.Core.SafeAfter` directly (or a cached local).
+
+- **ObjectiveTracker.lua:259-260** — `SECTION_SPACING` / `ITEM_SPACING` module-level constants are immediately overwritten by `addonTable.db.sectionSpacing` / `itemSpacing` on every `UpdateContent` (lines 2120-2121). Either drop the module-level pair or move the DB read into a dedicated `RefreshSpacingFromDB()` initializer called on settings change instead of every render.
+
+- **ObjectiveTracker.lua:401** — `local useMetric = not (GetLocale() == "enUS" or GetLocale() == "enGB")` calls `GetLocale()` twice in one expression. Cache to a local first. Trivial micro-opt.
+
+- **ObjectiveTracker.lua:2325** — `local timerType, timeRemaining, totalTime = ...` — `timerType` and `totalTime` are unused. Replace with `local _, timeRemaining = ...`.
+
+- **ObjectiveTracker.lua:1159-1165** — `SetAlpha(1); SetScale(1); EnableMouse(true)` cluster has no comment explaining "this is the restore-to-Blizzard-default path". Add a one-liner — and per Critical, drop the `SetScale`.
+
+- **Secret.lua:50-93** — `SafeUnitNameUnmodified`, `SafeUnitGUID`, `SafeConcat`, `CanAccessSecrets` are defined but never called from any module. Either delete them until they're actually needed, or move the whole module to a shared lib that the rest of the addon family can pull in.
+
+- **Helpers.lua:160-206 + 206 (`Helpers.fonts = BuildFontList()`)** — `BuildFontList` runs eagerly at `Helpers.lua` load time, calling `GetFonts()` (a global font scan). Defer to first dropdown open instead of paying the cost on every `/reload`.
+
+- **TrackerPanel.lua:46-510 (~ 20 checkboxes)** — The checkbox creation block is mechanically identical: `CreateFrame("CheckButton", name, panel, "ChatConfigCheckButtonTemplate") → SetPoint → SetHitRectInsets → Helpers.SetCheckButtonLabel → SetChecked → SetScript("OnClick", function …)`. A `Helpers.CreateConfigCheckbox(panel, point, hitInsets, label, dbKey, onChangeFn)` would cut ~400 lines and keep the offset/inset values readable.
+
+- **TrackerPanel.lua:39 (`panel = scrollChild`)** — Reassigning the parameter `panel` to the scroll-child shadow is a footgun — any future code added above line 39 thinks `panel` is the panel, anything below thinks it's the scroll-child. Rename to `content` after the reassignment.
+
+- **ConfigWindow.lua:43-46** — `scrollChild:SetSize(scrollFrame:GetWidth(), 1400)` reads `scrollFrame:GetWidth()` immediately after `SetPoint("BOTTOMRIGHT", -30, 10)`. Width may not be resolved on first frame for some users — defer to `OnShow`, or anchor scroll-child by both corners instead of `SetSize`.
+
+- **TrackerPanel.lua:35** — `scrollChild:SetSize(560, 1230)` — magic numbers. `1230` is hand-tuned to fit current content; any new section pushes content past the bottom. Compute or grow dynamically based on the last `yPos` after the panel is laid out.
+
+- **ObjectiveTracker.lua:861-996** — The `OnEnter` closure for every `AddLine` button still captures `self`, `addonTable`, `Secret`, `tooltipMembers`, `RAID_CLASS_COLORS`, `C_CampaignInfo`, `C_QuestLine`, `C_QuestLog`, `GetQuestUiMapID`, `C_Map`, `GameTooltip`, `IsInGroup`, `IsInRaid`, `UnitExists`, `UnitIsUnit`. That's ~15 upvalues per closure × however many lines `AddLine` builds. Hoisting the `OnEnter` body into a single file-level function and binding via `btn:SetScript("OnEnter", QuestPreviewOnEnter)` (closing only over `self`) would cut allocations dramatically.
+
+- **ObjectiveTracker.lua:1471-1520 (`RenderSingleQuest`) + 1976-2017 (`RenderOneCampaignQuest`)** — Two near-identical inner functions for "render this quest, its objectives, possible auto-complete row, then bump yOffset". Extract into a single helper that takes a color-resolver callback so the campaign vs. non-campaign branches don't drift.
+
+- **TrackerPanel.lua:870-906, 916-953, 999-1029, 1036-1067, 1086-1126, 1144-1184** — Six near-identical color-swatch-with-picker blocks (section header / active quest / campaign / quest name / objective / border / background). A `Helpers.CreateColorSwatch(parent, dbKey, default, onChange)` would collapse ~250 lines into one definition and a few call-sites.
+
+- **ObjectiveTracker.lua:2389-2398 (hookFrame)** — Registers both `PLAYER_LOGIN` and `PLAYER_ENTERING_WORLD`, fires once, unregisters. Either of those events alone is enough since `UpdateSettings` is also driven from the main `f` frame at line 2369. Drop the duplicate or inline its body into the main login frame's `OnEvent`.
+
+- **ObjectiveTracker.lua:1402-1413 ("Temporary Objectives" inline)** — Even before the renderer-table fix above, this block uses `AddLine("Temporary Objectives", true, "tempObjectives")` followed by `if not addonTable.db.collapsed["tempObjectives"]` — works, but the `else` branch (`ucState.yOffset = ucState.yOffset - ITEM_SPACING`) is on the inner-if, while collapsed-state for the surrounding "Quests" header is handled differently. Inconsistent formatting — pick one collapse-handling pattern.
+
+- **ObjectiveTracker.lua:1693-1707 (criteria render)** — Two paths: explicit count (`for i = 1, numCriteria`) and the `while criteriaIndex <= 50` fallback. `seenCriteriaIDs` deduplicates the second path, but if Blizzard ever returns `nil` early in a numbered run, the fallback also kicks in unnecessarily. The hard cap of 50 is a magic number that should be a named constant or replaced by "iterate until nil".
+
+- **ObjectiveTracker.lua:209** — `itemBtn:SetFrameLevel(btn:GetFrameLevel() + 2)` — the `+2` is unexplained. Why not `+1`? A comment ("above the line plus toggle button") would document the intent.
+
+## Summary
+
+The addon has cleaned up several previously-flagged issues — campaign-quest tooltip enhancements landed cleanly, secret-value handling is now consistently routed through `addonTable.Secret` via `Secret.CanAccessValue` guards in the scenario timer block, and the `CHALLENGE_MODE_*` handlers now route through `ScheduleUpdateContent` instead of direct Show/Hide. The biggest *unaddressed* risks are still in the same family: `SecureHandlerStateTemplate` combat-lockdown blind spots on `trackerFrame` (the disable-branch `Hide`, the unguarded `SetSize`/`SetFrameStrata`, the drag-stop `SetPoint`, the `SetScale` on `ObjectiveTrackerFrame`), plus the `ApplyDefaults` reference-aliasing bug that quietly breaks Reset-to-Defaults whenever a user touches a color picker. Two new findings beyond the previous review: (1) `AcquireItem` can `CreateFrame("...SecureActionButtonTemplate")` and `SetFrameLevel` on it during combat when the pool grows, which will be blocked, and (2) the `tempObjectives` entry in the user-facing section-order list is a Potemkin row — its renderer is `function() end` and the actual rendering is hard-coded inline in `RenderQuests`, so reordering it has no effect. Once the combat-lockdown criticals and the defaults aliasing are resolved, the addon's remaining surface is mostly performance polish (ticker churn on settings change, full-rebuild distance updates, unbounded `questLineCache` and `itemPool`) and a substantial refactoring opportunity to reduce ~600 lines of mechanically-duplicated checkbox / color-swatch / quest-render code in `TrackerPanel.lua` and `ObjectiveTracker.lua`.

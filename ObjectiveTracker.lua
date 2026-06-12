@@ -129,7 +129,12 @@ local function OnQuestClick(self, button)
 
     if not InCombatLockdown() and self.questID and type(self.questID) == "number" and addonTable.db.clickOpenQuest then
         if QuestMapFrame_OpenToQuestDetails then
-            if not QuestMapFrame:IsShown() then ToggleQuestLog() end
+            -- Opens the world map + quest log and focuses the quest (no
+            -- separate ToggleQuestLog needed — OpenToQuestDetails calls
+            -- OpenQuestLog itself). Running this from addon context taints
+            -- QuestMapFrame.DetailsFrame.questID, which Blizzard's map pin
+            -- refresh reads back on every map open; utils/MapTaintGuard.lua
+            -- absorbs the in-combat SetPassThroughButtons fallout.
             QuestMapFrame_OpenToQuestDetails(self.questID)
         else
             QuestLog_OpenToQuest(self.questID)
@@ -1150,6 +1155,9 @@ function addonTable.ObjectiveTracker.UpdateSettings()
     local enabled = addonTable.db.enabled
 
     if enabled then
+        if addonTable.MapTaintGuard then
+            addonTable.MapTaintGuard.Apply()
+        end
         if ObjectiveTrackerFrame then
             ObjectiveTrackerFrame:SetAlpha(0)
             ObjectiveTrackerFrame:EnableMouse(false)

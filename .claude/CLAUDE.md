@@ -38,6 +38,12 @@ WoW's secure execution model taints addon code that touches Blizzard's protected
 - **Unsafe hooks**: `frame:HookScript("OnEvent", cb)` — taints frame context
 - Track addon state about Blizzard frames using side-tables keyed by frame ref, never write to the frame itself
 
+### Map Pin Taint (utils/MapTaintGuard.lua)
+- Calling `QuestMapFrame_OpenToQuestDetails` (or anything that opens quest details) from addon code taints `QuestMapFrame.DetailsFrame.questID`; Blizzard's `QuestDataProviderMixin:ShouldShowQuest` reads it back via `QuestMapFrame_GetFocusedQuestID()` on every map pin refresh, and `SetPassThroughButtons` is restricted in combat → `ADDON_ACTION_BLOCKED` on every quest pin when the map is opened in combat
+- The taint cannot be cleared from addon code (nil written insecurely is still a tainted read); `utils/MapTaintGuard.lua` therefore replaces `WorldMapFrame.AcquirePin` (and `BattlefieldMapFrame`'s) with a verbatim copy of `MapCanvasMixin:AcquirePin` and shadows the combat-restricted input methods (`SetPassThroughButtons`, `SetPropagateMouseClicks`, `SetPropagateMouseMotion`) per pin instance with combat-guarded wrappers — re-sync the copy with `Blizzard_MapCanvas.lua` when bumping the Interface version
+- Note the replaced `AcquirePin` makes ALL pin acquisition run tainted, so ANY combat-restricted call reachable from `pin:OnAcquired()` must be covered by the per-pin wrappers (this is why `SetPropagateMouseClicks` errored after the first guard only covered `SetPassThroughButtons`)
+- `C_SuperTrack.SetSuperTrackedQuestID` / `C_QuestLog.AddQuestWatch` etc. are C-side state and do NOT carry taint — the auto-supertrack features are safe
+
 ### Secret Values
 `issecretvalue(v)` returns `true` for values returned by Blizzard's secure code paths during combat.
 

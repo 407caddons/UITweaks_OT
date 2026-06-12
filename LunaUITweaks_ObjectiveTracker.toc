@@ -2,7 +2,7 @@
 ## Title: |cff00ff96Luna's UI Tweaks|r - Objective Tracker
 ## Notes: Custom objective tracker with quest/WQ/achievement tracking, super-track restore, and more.
 ## Author: 407c
-## Version: 1.1.0
+## Version: 1.2.0
 ## X-Curse-Project-ID: 1493891
 ## SavedVariables: LunaObjectiveTrackerDB
 ## OptionalDeps: LunaUITweaks
@@ -12,6 +12,10 @@
 
 # Secret-value helpers for TWW 12.0+ (must load first so all modules can use it)
 utils\Secret.lua
+
+# Combat-guards the world map's pin acquisition against the focused-quest
+# taint our click-to-open feature unavoidably injects (see file header)
+utils\MapTaintGuard.lua
 
 # Core (defaults, utilities, integration detection)
 Core.lua
