@@ -28,15 +28,25 @@ local _, addonTable = ...
 -- entirely, we only skip it while InCombatLockdown().
 --
 -- The mechanism: replace the map frame's AcquirePin with a verbatim copy of
--- MapCanvasMixin:AcquirePin (Blizzard_MapCanvas.lua), and combat-guard the
--- combat-restricted input-propagation widget methods per pin instance
+-- MapCanvasMixin:AcquirePin (Blizzard_MapCanvas.lua), and apply two guards:
+--
+-- Guard 1 — per-pin combat guards on restricted input-propagation methods
 -- (SetPassThroughButtons via MapCanvasPinMixin:CheckMouseButtonPassthrough,
 -- SetPropagateMouseClicks via SuperTrackablePinMixin:UpdateMousePropagation —
 -- the only two such calls in all of Blizzard_SharedMapDataProviders as of
 -- 12.0; SetPropagateMouseMotion is wrapped as insurance). Out of combat the
--- behaviour is identical (the calls are legal then, tainted or not). In
--- combat a pin keeps its previous propagation/passthrough setting until next
--- acquired or updated out of combat — cosmetic.
+-- behaviour is identical. In combat a pin keeps its previous propagation/
+-- passthrough setting until next acquired or updated out of combat — cosmetic.
+--
+-- Guard 2 — deferred SetScript re-set for new pins
+-- For newly created pins (newPin = true) our replaced AcquirePin calls
+-- SetScript("OnEnter"/"OnLeave"/"OnMouseUp"/…) in tainted context, which
+-- permanently marks those handlers as tainted. When the handler later fires
+-- (e.g. user hovers an area-POI pin), GetStringHeight() returns a secret
+-- number in the tooltip widget path (UIWidgetTemplateTextWithState:Setup)
+-- and the subsequent arithmetic errors. A C_Timer.After(0) callback re-sets
+-- the same scripts one frame later from a fresh, non-tainted call context,
+-- stripping the taint mark. This appeared as a new error in 12.0.5/12.0.7.
 --
 -- NOTE: this deliberately breaks the "never write fields onto Blizzard
 -- frames" rule. Writing the AcquirePin key taints exactly that key, which is
@@ -147,6 +157,29 @@ local function AcquirePin(self, pinTemplate, ...)
 
         pin:SetMouseClickEnabled(isMouseClickEnabled)
         pin:SetMouseMotionEnabled(isMouseMotionEnabled)
+
+        -- LunaUITweaks addition: the SetScript calls above run in tainted context
+        -- when the data provider update is tainted by the focused-quest questID field.
+        -- Tainted OnEnter/OnLeave scripts then cause GetStringHeight() to return a
+        -- secret number in UIWidgetTemplateTextWithState:Setup (line 35), making the
+        -- subsequent arithmetic fail. Re-set the same scripts from a C_Timer callback
+        -- one frame later — timer callbacks fire in a fresh, non-tainted call context,
+        -- which strips the taint mark from the handlers.
+        local p = pin
+        local pMCE = isMouseClickEnabled
+        local pMME = isMouseMotionEnabled
+        local pIsBtn = pin:IsObjectType("Button")
+        C_Timer.After(0, function()
+            if pMCE then
+                p:SetScript("OnMouseUp", OnPinMouseUp)
+                p:SetScript("OnMouseDown", p.OnMouseDown)
+                if pIsBtn then p:SetScript("OnClick", nil) end
+            end
+            if pMME then
+                p:SetScript("OnEnter", p.OnMouseEnter)
+                p:SetScript("OnLeave", p.OnMouseLeave)
+            end
+        end)
     end
 
     if newPin then

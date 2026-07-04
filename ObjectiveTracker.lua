@@ -2,7 +2,11 @@ local addonName, addonTable = ...
 addonTable.ObjectiveTracker = {}
 
 local SafeAfter = addonTable.Core and addonTable.Core.SafeAfter or function(delay, func)
-    C_Timer.After(delay, function() local ok, err = pcall(func) if not ok then print("|cffff0000LunaUITweaks error:|r " .. tostring(err)) end end)
+    C_Timer.After(delay,
+        function()
+            local ok, err = pcall(func)
+            if not ok then print("|cffff0000LunaUITweaks error:|r " .. tostring(err)) end
+        end)
 end
 
 local Secret = addonTable.Secret
@@ -16,9 +20,9 @@ local UpdateContent
 local autoTrackFrame
 local distanceTicker
 local timerTicker
-local activeTimerBtns = {}   -- questID -> { btn, endTime }
+local activeTimerBtns = {}       -- questID -> { btn, endTime }
 local trackerHiddenByKeybind = false
-local scenarioTimerEndTime = nil  -- set by WORLD_STATE_TIMER_START; used for scenario countdown
+local scenarioTimerEndTime = nil -- set by WORLD_STATE_TIMER_START; used for scenario countdown
 
 -- Helper: check if we are in a raid instance
 local function IsInRaidInstance()
@@ -335,14 +339,23 @@ local function GetTimeLeftString(questID)
         local hours = math.floor((timeLeftMinutes % MINUTES_PER_DAY) / MINUTES_PER_HOUR)
         local minutes = timeLeftMinutes % 60
         local timeStr
-        if days > 0 then timeStr = string.format("(%dd %dh)", days, hours)
-        elseif hours > 0 then timeStr = string.format("(%dh %dm)", hours, minutes)
-        else timeStr = string.format("(%dm)", minutes) end
+        if days > 0 then
+            timeStr = string.format("(%dd %dh)", days, hours)
+        elseif hours > 0 then
+            timeStr = string.format("(%dh %dm)", hours, minutes)
+        else
+            timeStr = string.format("(%dm)", minutes)
+        end
         local color
-        if timeLeftMinutes > 240 then color = "00FF00"
-        elseif timeLeftMinutes > 60 then color = "FFFF00"
-        elseif timeLeftMinutes > 15 then color = "FF8800"
-        else color = "FF0000" end
+        if timeLeftMinutes > 240 then
+            color = "00FF00"
+        elseif timeLeftMinutes > 60 then
+            color = "FFFF00"
+        elseif timeLeftMinutes > 15 then
+            color = "FF8800"
+        else
+            color = "FF0000"
+        end
         return string.format(" |cFF%s%s|r", color, timeStr)
     end
     return ""
@@ -410,7 +423,9 @@ local function GetDistanceString(questID)
     if not distSq then return "" end
     local dist = math.sqrt(distSq)
     local unit = "yds"
-    if useMetric then dist = dist * 0.9144; unit = "m" end
+    if useMetric then
+        dist = dist * 0.9144; unit = "m"
+    end
     if dist >= 1000 then
         return string.format(" |cFFAAAAAA(%.1fk %s)|r", dist / 1000, unit)
     else
@@ -438,7 +453,9 @@ local function GetQuestLineString(questID)
     local currentStep = 0
     local totalSteps = #quests
     for i, qID in ipairs(quests) do
-        if qID == questID then currentStep = i; break end
+        if qID == questID then
+            currentStep = i; break
+        end
     end
     if currentStep == 0 then
         local completed = 0
@@ -900,14 +917,17 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                         if C_CampaignInfo and C_CampaignInfo.GetCampaignID then
                             local campaignID = C_CampaignInfo.GetCampaignID(self.questID)
                             if campaignID and campaignID > 0 then
-                                local info = C_CampaignInfo.GetCampaignInfo and C_CampaignInfo.GetCampaignInfo(campaignID)
+                                local info = C_CampaignInfo.GetCampaignInfo and
+                                    C_CampaignInfo.GetCampaignInfo(campaignID)
                                 local chapterIDs = info and info.chapterIDs
                                 if chapterIDs and #chapterIDs > 0 then
-                                    local currentChapterID = C_CampaignInfo.GetCurrentChapterID and C_CampaignInfo.GetCurrentChapterID(campaignID)
+                                    local currentChapterID = C_CampaignInfo.GetCurrentChapterID and
+                                        C_CampaignInfo.GetCurrentChapterID(campaignID)
                                     GameTooltip:AddLine(" ")
                                     GameTooltip:AddLine(((info and info.name) or "Campaign") .. " Chapters:")
                                     for _, cid in ipairs(chapterIDs) do
-                                        local chapter = C_CampaignInfo.GetCampaignChapterInfo and C_CampaignInfo.GetCampaignChapterInfo(cid)
+                                        local chapter = C_CampaignInfo.GetCampaignChapterInfo and
+                                            C_CampaignInfo.GetCampaignChapterInfo(cid)
                                         if chapter and chapter.name then
                                             local r, g, b
                                             if chapter.isComplete then
@@ -932,11 +952,14 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                             if not lineInfo and plMap > 0 and plMap ~= mapID then
                                 lineInfo = C_QuestLine.GetQuestLineInfo(self.questID, plMap)
                             end
-                            local lineQuests = lineInfo and lineInfo.questLineID and C_QuestLine.GetQuestLineQuests(lineInfo.questLineID)
+                            local lineQuests = lineInfo and lineInfo.questLineID and
+                                C_QuestLine.GetQuestLineQuests(lineInfo.questLineID)
                             if lineQuests and #lineQuests > 0 then
                                 local currentIdx
                                 for i, qID in ipairs(lineQuests) do
-                                    if qID == self.questID then currentIdx = i; break end
+                                    if qID == self.questID then
+                                        currentIdx = i; break
+                                    end
                                 end
                                 GameTooltip:AddLine(" ")
                                 GameTooltip:AddLine((lineInfo.questLineName or "Quest Line") .. ":")
@@ -946,7 +969,8 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                                         C_QuestLog.RequestLoadQuestByID(qID)
                                         title = "Quest " .. qID
                                     end
-                                    local isFlaggedDone = C_QuestLog.IsQuestFlaggedCompleted and C_QuestLog.IsQuestFlaggedCompleted(qID)
+                                    local isFlaggedDone = C_QuestLog.IsQuestFlaggedCompleted and
+                                        C_QuestLog.IsQuestFlaggedCompleted(qID)
                                     local isOn = C_QuestLog.IsOnQuest and C_QuestLog.IsOnQuest(qID)
                                     local r, g, b
                                     if qID == self.questID or isOn then
@@ -1148,6 +1172,17 @@ local function SetupCustomTracker()
     end)
 end
 
+local function EnableTrackerMouse(frame, depth)
+    depth = depth or 0
+    if depth > 10 then return end
+    local name = frame.GetName and frame:GetName()
+    if name and name:find("Widget") then return end
+    frame:EnableMouse(true)
+    for i = 1, frame:GetNumChildren() do
+        EnableTrackerMouse(select(i, frame:GetChildren()), depth + 1)
+    end
+end
+
 -- ============================================================
 -- UpdateSettings
 -- ============================================================
@@ -1169,7 +1204,7 @@ function addonTable.ObjectiveTracker.UpdateSettings()
         if ObjectiveTrackerFrame then
             ObjectiveTrackerFrame:SetAlpha(1)
             ObjectiveTrackerFrame:SetScale(1)
-            ObjectiveTrackerFrame:EnableMouse(true)
+            EnableTrackerMouse(ObjectiveTrackerFrame)
         end
         if trackerFrame then
             trackerFrame:Hide()
@@ -1223,7 +1258,9 @@ function addonTable.ObjectiveTracker.UpdateSettings()
             trackerFrame:SetBackdrop({
                 bgFile = "Interface\\Buttons\\WHITE8X8",
                 edgeFile = "Interface\\Buttons\\WHITE8X8",
-                tile = false, tileSize = 0, edgeSize = 1,
+                tile = false,
+                tileSize = 0,
+                edgeSize = 1,
                 insets = { left = 1, right = 1, top = 1, bottom = 1 }
             })
             if showBackground then
@@ -1246,7 +1283,9 @@ function addonTable.ObjectiveTracker.UpdateSettings()
         trackerFrame:SetBackdrop({
             bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
             edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-            tile = true, tileSize = 16, edgeSize = 16,
+            tile = true,
+            tileSize = 16,
+            edgeSize = 16,
             insets = { left = 4, right = 4, top = 4, bottom = 4 }
         })
         trackerFrame:SetBackdropColor(0, 0, 0, 0.5)
@@ -1370,13 +1409,18 @@ local function RenderWorldQuests()
                                 local objectives = C_QuestLog.GetQuestObjectives(questID)
                                 if objectives then
                                     for _, obj in ipairs(objectives) do
-                                        if obj.numFulfilled and obj.numFulfilled > 0 then hasProgress = true; break end
+                                        if obj.numFulfilled and obj.numFulfilled > 0 then
+                                            hasProgress = true; break
+                                        end
                                     end
                                 end
                                 if hasProgress or isActive then table.insert(activeWQs, questID) end
                             else
-                                if isActive then table.insert(activeWQs, questID)
-                                else table.insert(otherWQs, questID) end
+                                if isActive then
+                                    table.insert(activeWQs, questID)
+                                else
+                                    table.insert(otherWQs, questID)
+                                end
                             end
                         end
                     end -- distance filter
@@ -1459,8 +1503,11 @@ local function RenderQuests()
                     C_CampaignInfo and C_CampaignInfo.IsCampaignQuest and C_CampaignInfo.IsCampaignQuest(qID) then
                     -- skip — rendered in campaignQuests section
                 elseif not displayedIDs[qID] then
-                    if qID == superTrackedQuestID then superTrackedIndex = i
-                    else table.insert(filteredIndices, i) end
+                    if qID == superTrackedQuestID then
+                        superTrackedIndex = i
+                    else
+                        table.insert(filteredIndices, i)
+                    end
                 end
             end
         end
@@ -1480,10 +1527,14 @@ local function RenderQuests()
                 if extraIndent then ucState.indent = extraIndent end
                 local title = C_QuestLog.GetTitleForQuestID(questID)
                 if title then
-                    title = GetQuestTypePrefix(questID) .. title .. GetQuestLineString(questID) .. GetDistanceString(questID)
+                    title = GetQuestTypePrefix(questID) ..
+                        title .. GetQuestLineString(questID) .. GetDistanceString(questID)
                     local color = nil
-                    if questID == superTrackedQuestID then color = addonTable.db.activeQuestColor
-                    else color = GetCampaignColor(questID) end
+                    if questID == superTrackedQuestID then
+                        color = addonTable.db.activeQuestColor
+                    else
+                        color = GetCampaignColor(questID)
+                    end
                     AddLine(title, false, questID, nil, false, color)
                     displayedIDs[questID] = true
                     AddTimerLine(questID)
@@ -1629,11 +1680,15 @@ local function RenderQuests()
                     end
                 end
                 for _, campaignName in ipairs(campaignOrder) do
-                    RenderGroupHeader("campaign_" .. campaignName, campaignName, questsByCampaign[campaignName], 0.9, 0.7, 0.2)
+                    RenderGroupHeader("campaign_" .. campaignName, campaignName, questsByCampaign[campaignName], 0.9, 0.7,
+                        0.2)
                 end
                 if #nonCampaignQuests > 0 then
-                    if useZoneGroup then RenderByZone(nonCampaignQuests)
-                    else for _, questID in ipairs(nonCampaignQuests) do RenderSingleQuest(questID) end end
+                    if useZoneGroup then
+                        RenderByZone(nonCampaignQuests)
+                    else
+                        for _, questID in ipairs(nonCampaignQuests) do RenderSingleQuest(questID) end
+                    end
                 end
             elseif useZoneGroup then
                 local questIDs = {}
@@ -1656,7 +1711,8 @@ local function RenderScenarios()
     if not scenarioInfo or not scenarioInfo.name or scenarioInfo.name == "" then return end
     local headerText = "Scenario: " .. scenarioInfo.name
     if scenarioInfo.numStages and scenarioInfo.numStages > 1 then
-        headerText = headerText .. string.format(" |cFFAAAAAA(%d/%d)|r", scenarioInfo.currentStage or 1, scenarioInfo.numStages)
+        headerText = headerText ..
+            string.format(" |cFFAAAAAA(%d/%d)|r", scenarioInfo.currentStage or 1, scenarioInfo.numStages)
     end
     AddLine(headerText, true, "scenario")
     if addonTable.db.collapsed["scenario"] then
@@ -1692,8 +1748,11 @@ local function RenderScenarios()
             and criteriaInfo.totalQuantity > 1 then
             text = text .. " (" .. criteriaInfo.quantity .. "/" .. criteriaInfo.totalQuantity .. ")"
         end
-        if criteriaInfo.failed then text = "|cFFFF0000" .. text .. " (Failed)|r"
-        elseif criteriaInfo.completed then text = FormatCompletedObjective(text) end
+        if criteriaInfo.failed then
+            text = "|cFFFF0000" .. text .. " (Failed)|r"
+        elseif criteriaInfo.completed then
+            text = FormatCompletedObjective(text)
+        end
         if criteriaInfo.isWeightedProgress then text = "|cFF00FFFF[Bonus]|r " .. text end
         AddLine(text, false, nil, nil, true)
         return true
@@ -1802,7 +1861,9 @@ local function RenderAchievements()
             if numCriteria > 0 then
                 for j = 1, numCriteria do
                     local _, _, completed = GetAchievementCriteriaInfo(achID, j)
-                    if not completed then allCompleted = false; break end
+                    if not completed then
+                        allCompleted = false; break
+                    end
                 end
             end
             if numCriteria > 0 and allCompleted and addonTable.db.hideCompletedSubtasks then
@@ -1852,7 +1913,9 @@ local function AutoUntrackCompletedPerksActivities()
                 for _, req in ipairs(activity.requirementsList) do
                     if req and req.requirementText and req.requirementText ~= "" then
                         hasRequirements = true
-                        if not req.completed then allDone = false; break end
+                        if not req.completed then
+                            allDone = false; break
+                        end
                     end
                 end
             end
@@ -1897,7 +1960,9 @@ local function RenderTravelersLog()
                 for _, req in ipairs(activity.requirementsList) do
                     if req and req.requirementText and req.requirementText ~= "" then
                         hasRequirements = true
-                        if not req.completed then allCompleted = false; break end
+                        if not req.completed then
+                            allCompleted = false; break
+                        end
                     end
                 end
             end
@@ -1920,7 +1985,9 @@ local function RenderTravelersLog()
                 for _, req in ipairs(activity.requirementsList) do
                     if req and req.requirementText and req.requirementText ~= "" then
                         hasRequirements = true
-                        if not req.completed then allCompleted = false; break end
+                        if not req.completed then
+                            allCompleted = false; break
+                        end
                     end
                 end
             end
@@ -1988,8 +2055,11 @@ local function RenderCampaignQuests()
         if title then
             title = GetQuestTypePrefix(questID) .. title .. GetQuestLineString(questID) .. GetDistanceString(questID)
             local color
-            if questID == superTrackedQuestID then color = addonTable.db.activeQuestColor
-            else color = addonTable.db.campaignQuestColor end
+            if questID == superTrackedQuestID then
+                color = addonTable.db.activeQuestColor
+            else
+                color = addonTable.db.campaignQuestColor
+            end
             AddLine(title, false, questID, nil, false, color)
             displayedIDs[questID] = true
             AddTimerLine(questID)
@@ -2160,23 +2230,31 @@ UpdateContent = function()
     else
         local hasTravelersLog = false
         for _, key in ipairs(orderList) do
-            if key == "travelersLog" then hasTravelersLog = true; break end
+            if key == "travelersLog" then
+                hasTravelersLog = true; break
+            end
         end
         if not hasTravelersLog then
             local insertPos = 3
             for i, key in ipairs(orderList) do
-                if key == "tempObjectives" then insertPos = i + 1; break end
+                if key == "tempObjectives" then
+                    insertPos = i + 1; break
+                end
             end
             table.insert(orderList, insertPos, "travelersLog")
         end
         local hasCampaignQuests = false
         for _, key in ipairs(orderList) do
-            if key == "campaignQuests" then hasCampaignQuests = true; break end
+            if key == "campaignQuests" then
+                hasCampaignQuests = true; break
+            end
         end
         if not hasCampaignQuests then
             local insertPos = #orderList + 1
             for i, key in ipairs(orderList) do
-                if key == "quests" then insertPos = i; break end
+                if key == "quests" then
+                    insertPos = i; break
+                end
             end
             table.insert(orderList, insertPos, "campaignQuests")
         end
@@ -2184,14 +2262,18 @@ UpdateContent = function()
 
     local seen = {}; local deduped = {}
     for _, key in ipairs(orderList) do
-        if not seen[key] then seen[key] = true; table.insert(deduped, key) end
+        if not seen[key] then
+            seen[key] = true; table.insert(deduped, key)
+        end
     end
     for i = #orderList, 1, -1 do orderList[i] = nil end
     for i, key in ipairs(deduped) do orderList[i] = key end
 
     campaignQuestsSectionActive = false
     for _, key in ipairs(orderList) do
-        if key == "campaignQuests" then campaignQuestsSectionActive = true; break end
+        if key == "campaignQuests" then
+            campaignQuestsSectionActive = true; break
+        end
     end
 
     for _, sectionKey in ipairs(orderList) do
