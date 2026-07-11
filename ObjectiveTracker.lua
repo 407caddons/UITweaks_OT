@@ -886,7 +886,30 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                     if GameTooltip:IsForbidden() then return end
                     if self.questID then
                         GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT", 5, 0)
-                        GameTooltip:SetHyperlink("quest:" .. self.questID)
+                        if InCombatLockdown() then
+                            -- SetHyperlink("quest:...") can embed a reward widget set
+                            -- (e.g. world-boss cache item) in the tooltip; its Setup
+                            -- reads FontString sizes that are secret while our tainted
+                            -- execution runs in combat → arithmetic error in
+                            -- Blizzard_UIWidgetTemplateBase. Build a plain text
+                            -- tooltip in combat instead.
+                            local title = C_QuestLog.GetTitleForQuestID(self.questID)
+                            GameTooltip:SetText(title or QUEST_LOG or "Quest", 1, 0.82, 0)
+                            local objectives = C_QuestLog.GetQuestObjectives(self.questID)
+                            if objectives then
+                                for _, obj in ipairs(objectives) do
+                                    if obj.text and obj.text ~= "" then
+                                        if obj.finished then
+                                            GameTooltip:AddLine(obj.text, 0.5, 0.5, 0.5)
+                                        else
+                                            GameTooltip:AddLine(obj.text, 0.8, 0.8, 0.8)
+                                        end
+                                    end
+                                end
+                            end
+                        else
+                            GameTooltip:SetHyperlink("quest:" .. self.questID)
+                        end
                         if IsInGroup() then
                             wipe(tooltipMembers)
                             local maxUnit = IsInRaid() and 40 or 4
