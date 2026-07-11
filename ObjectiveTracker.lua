@@ -12,6 +12,7 @@ end
 local Secret = addonTable.Secret
 
 local trackerFrame
+local trackerBody
 local scrollFrame
 local scrollChild
 local headerFrame
@@ -1097,21 +1098,32 @@ local function SetupCustomTracker()
     if trackerFrame then return end
     local settings = addonTable.db
 
-    trackerFrame = CreateFrame("Frame", "UIThingsTrackerFrame", UIParent, "BackdropTemplate,SecureHandlerStateTemplate")
-    trackerFrame:SetMovable(true)
-    trackerFrame:SetResizable(true)
-    trackerFrame:SetClampedToScreen(true)
-    trackerFrame:SetFrameStrata(settings.strata or "LOW")
-    trackerFrame:SetSize(settings.width, settings.height)
+    -- trackerFrame carries SecureHandlerStateTemplate so its visibility can be
+    -- driven by RegisterStateDriver (combat-safe show/hide). Once a state
+    -- driver is registered on a frame, WoW permanently marks that frame
+    -- protected: any later SetSize/SetPoint/etc. from insecure code is
+    -- blocked with ADDON_ACTION_BLOCKED, even outside combat. So trackerFrame
+    -- itself is never resized/repositioned/backdropped — it's just a
+    -- full-screen secure wrapper. All actual geometry lives on trackerBody,
+    -- a plain child frame that's always safe to size/move/resize.
+    trackerFrame = CreateFrame("Frame", "UIThingsTrackerFrame", UIParent, "SecureHandlerStateTemplate")
+    trackerFrame:SetAllPoints(UIParent)
+
+    trackerBody = CreateFrame("Frame", "UIThingsTrackerBody", trackerFrame, "BackdropTemplate")
+    trackerBody:SetMovable(true)
+    trackerBody:SetResizable(true)
+    trackerBody:SetClampedToScreen(true)
+    trackerBody:SetFrameStrata(settings.strata or "LOW")
+    trackerBody:SetSize(settings.width, settings.height)
 
     local pos = settings
     if pos.point then
-        trackerFrame:SetPoint(pos.point, UIParent, pos.point, pos.x or 0, pos.y or 0)
+        trackerBody:SetPoint(pos.point, UIParent, pos.point, pos.x or 0, pos.y or 0)
     else
-        trackerFrame:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", -10, -200)
+        trackerBody:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", -10, -200)
     end
 
-    local headerFrame_ = CreateFrame("Frame", nil, trackerFrame)
+    local headerFrame_ = CreateFrame("Frame", nil, trackerBody)
     headerFrame_:SetPoint("TOPLEFT")
     headerFrame_:SetPoint("TOPRIGHT")
     headerFrame_:SetHeight(30)
@@ -1127,12 +1139,12 @@ local function SetupCustomTracker()
     end
 
     -- Drag
-    trackerFrame:EnableMouse(true)
-    trackerFrame:RegisterForDrag("LeftButton")
-    trackerFrame:SetScript("OnDragStart", function(self)
+    trackerBody:EnableMouse(true)
+    trackerBody:RegisterForDrag("LeftButton")
+    trackerBody:SetScript("OnDragStart", function(self)
         if not addonTable.db.locked then self:StartMoving() end
     end)
-    trackerFrame:SetScript("OnDragStop", function(self)
+    trackerBody:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
         local point, _, relativePoint, x, y = self:GetPoint()
         x = math.floor(x + 0.5)
@@ -1145,7 +1157,7 @@ local function SetupCustomTracker()
     end)
 
     -- Scroll frame
-    scrollFrame = CreateFrame("ScrollFrame", "UIThingsTrackerScroll", trackerFrame, "UIPanelScrollFrameTemplate")
+    scrollFrame = CreateFrame("ScrollFrame", "UIThingsTrackerScroll", trackerBody, "UIPanelScrollFrameTemplate")
     scrollFrame:SetPoint("TOPLEFT", headerFrame_, "BOTTOMLEFT", 10, -5)
     scrollFrame:SetPoint("BOTTOMRIGHT", -25, 10)
 
@@ -1154,7 +1166,7 @@ local function SetupCustomTracker()
     scrollFrame:SetScrollChild(scrollChild)
 
     -- Resize handle
-    local resizeHandle = CreateFrame("Frame", nil, trackerFrame)
+    local resizeHandle = CreateFrame("Frame", nil, trackerBody)
     resizeHandle:SetSize(16, 16)
     resizeHandle:SetPoint("BOTTOMRIGHT", -5, 5)
     local rTex = resizeHandle:CreateTexture(nil, "OVERLAY")
@@ -1162,11 +1174,11 @@ local function SetupCustomTracker()
     rTex:SetAllPoints()
     resizeHandle:EnableMouse(true)
     resizeHandle:SetScript("OnMouseDown", function()
-        if not addonTable.db.locked then trackerFrame:StartSizing("BOTTOMRIGHT") end
+        if not addonTable.db.locked then trackerBody:StartSizing("BOTTOMRIGHT") end
     end)
     resizeHandle:SetScript("OnMouseUp", function()
-        trackerFrame:StopMovingOrSizing()
-        local w, h = trackerFrame:GetSize()
+        trackerBody:StopMovingOrSizing()
+        local w, h = trackerBody:GetSize()
         addonTable.db.width = w
         addonTable.db.height = h
     end)
@@ -1236,8 +1248,8 @@ function addonTable.ObjectiveTracker.UpdateSettings()
         end
     end
 
-    trackerFrame:SetSize(addonTable.db.width, addonTable.db.height)
-    trackerFrame:SetFrameStrata(addonTable.db.strata or "LOW")
+    trackerBody:SetSize(addonTable.db.width, addonTable.db.height)
+    trackerBody:SetFrameStrata(addonTable.db.strata or "LOW")
     scrollChild:SetWidth(addonTable.db.width - 40)
 
     if headerFrame then
@@ -1251,11 +1263,11 @@ function addonTable.ObjectiveTracker.UpdateSettings()
     end
 
     if addonTable.db.locked then
-        trackerFrame:EnableMouse(false)
+        trackerBody:EnableMouse(false)
         local showBorder = addonTable.db.showBorder
         local showBackground = addonTable.db.showBackground
         if showBorder or showBackground then
-            trackerFrame:SetBackdrop({
+            trackerBody:SetBackdrop({
                 bgFile = "Interface\\Buttons\\WHITE8X8",
                 edgeFile = "Interface\\Buttons\\WHITE8X8",
                 tile = false,
@@ -1265,22 +1277,22 @@ function addonTable.ObjectiveTracker.UpdateSettings()
             })
             if showBackground then
                 local c = addonTable.db.backgroundColor or { r = 0, g = 0, b = 0, a = 0.5 }
-                trackerFrame:SetBackdropColor(c.r, c.g, c.b, c.a)
+                trackerBody:SetBackdropColor(c.r, c.g, c.b, c.a)
             else
-                trackerFrame:SetBackdropColor(0, 0, 0, 0)
+                trackerBody:SetBackdropColor(0, 0, 0, 0)
             end
             if showBorder then
                 local bc = addonTable.db.borderColor or { r = 0, g = 0, b = 0, a = 1 }
-                trackerFrame:SetBackdropBorderColor(bc.r, bc.g, bc.b, bc.a)
+                trackerBody:SetBackdropBorderColor(bc.r, bc.g, bc.b, bc.a)
             else
-                trackerFrame:SetBackdropBorderColor(0, 0, 0, 0)
+                trackerBody:SetBackdropBorderColor(0, 0, 0, 0)
             end
         else
-            trackerFrame:SetBackdrop(nil)
+            trackerBody:SetBackdrop(nil)
         end
     else
-        trackerFrame:EnableMouse(true)
-        trackerFrame:SetBackdrop({
+        trackerBody:EnableMouse(true)
+        trackerBody:SetBackdrop({
             bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
             edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
             tile = true,
@@ -1288,8 +1300,8 @@ function addonTable.ObjectiveTracker.UpdateSettings()
             edgeSize = 16,
             insets = { left = 4, right = 4, top = 4, bottom = 4 }
         })
-        trackerFrame:SetBackdropColor(0, 0, 0, 0.5)
-        trackerFrame:SetBackdropBorderColor(1, 1, 1, 1)
+        trackerBody:SetBackdropColor(0, 0, 0, 0.5)
+        trackerBody:SetBackdropBorderColor(1, 1, 1, 1)
     end
 
     -- Distance update ticker
