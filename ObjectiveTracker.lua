@@ -136,10 +136,9 @@ local function OnQuestClick(self, button)
         if QuestMapFrame_OpenToQuestDetails then
             -- Opens the world map + quest log and focuses the quest (no
             -- separate ToggleQuestLog needed — OpenToQuestDetails calls
-            -- OpenQuestLog itself). Running this from addon context taints
-            -- QuestMapFrame.DetailsFrame.questID, which Blizzard's map pin
-            -- refresh reads back on every map open; utils/MapTaintGuard.lua
-            -- absorbs the in-combat SetPassThroughButtons fallout.
+            -- OpenQuestLog itself). Do not replace or wrap map pin methods to
+            -- compensate for focused-quest taint: doing so taints area-POI
+            -- tooltip widget execution and poisons secret text measurements.
             QuestMapFrame_OpenToQuestDetails(self.questID)
         else
             QuestLog_OpenToQuest(self.questID)
@@ -1073,11 +1072,16 @@ end
 -- taint marker that survives pool release/re-acquire and causes Blizzard's
 -- widget Setup() to fail with a secret-value arithmetic error on textHeight
 -- etc. Skipping by name keeps us off the pool entirely.
+local trackerMouseStates = setmetatable({}, { __mode = "k" })
+
 local function DisableTrackerMouse(frame, depth)
     depth = depth or 0
     if depth > 10 then return end
     local name = frame.GetName and frame:GetName()
     if name and name:find("Widget") then return end
+    if trackerMouseStates[frame] == nil then
+        trackerMouseStates[frame] = frame:IsMouseEnabled()
+    end
     frame:EnableMouse(false)
     for i = 1, frame:GetNumChildren() do
         DisableTrackerMouse(select(i, frame:GetChildren()), depth + 1)
@@ -1102,7 +1106,6 @@ local function StartTrackerMouseTicker()
     trackerMouseTicker = C_Timer.NewTicker(0.5, function()
         if ObjectiveTrackerFrame and addonTable.db and addonTable.db.enabled then
             ObjectiveTrackerFrame:SetAlpha(0)
-            ObjectiveTrackerFrame:EnableMouse(false)
             DisableTrackerMouse(ObjectiveTrackerFrame)
         end
     end)
@@ -1207,14 +1210,32 @@ local function SetupCustomTracker()
     end)
 end
 
-local function EnableTrackerMouse(frame, depth)
-    depth = depth or 0
-    if depth > 10 then return end
-    local name = frame.GetName and frame:GetName()
-    if name and name:find("Widget") then return end
-    frame:EnableMouse(true)
-    for i = 1, frame:GetNumChildren() do
-        EnableTrackerMouse(select(i, frame:GetChildren()), depth + 1)
+local function RestoreTrackerMouse()
+    for frame, wasEnabled in pairs(trackerMouseStates) do
+        frame:EnableMouse(wasEnabled)
+        trackerMouseStates[frame] = nil
+    end
+end
+
+local function StopRuntime()
+    StopTrackerMouseTicker()
+    if distanceTicker then
+        distanceTicker:Cancel()
+        distanceTicker = nil
+    end
+    if timerTicker then
+        timerTicker:Cancel()
+        timerTicker = nil
+    end
+    wipe(activeTimerBtns)
+    if questSoundsMuted then
+        for _, fileID in ipairs(QUEST_SOUND_FILES) do
+            UnmuteSoundFile(fileID)
+        end
+        questSoundsMuted = false
+    end
+    if autoTrackFrame then
+        autoTrackFrame:UnregisterAllEvents()
     end
 end
 
@@ -1225,26 +1246,25 @@ function addonTable.ObjectiveTracker.UpdateSettings()
     local enabled = addonTable.db.enabled
 
     if enabled then
-        if addonTable.MapTaintGuard then
-            addonTable.MapTaintGuard.Apply()
-        end
         if ObjectiveTrackerFrame then
             ObjectiveTrackerFrame:SetAlpha(0)
-            ObjectiveTrackerFrame:EnableMouse(false)
             DisableTrackerMouse(ObjectiveTrackerFrame)
             StartTrackerMouseTicker()
         end
     else
-        StopTrackerMouseTicker()
+        StopRuntime()
         if ObjectiveTrackerFrame then
             ObjectiveTrackerFrame:SetAlpha(1)
             ObjectiveTrackerFrame:SetScale(1)
-            EnableTrackerMouse(ObjectiveTrackerFrame)
         end
+        RestoreTrackerMouse()
         if trackerFrame then
-            trackerFrame:Hide()
+            if not InCombatLockdown() then
+                UnregisterStateDriver(trackerFrame, "visibility")
+                trackerFrame:UnregisterAllEvents()
+                trackerFrame:Hide()
+            end
         end
-        autoTrackFrame:UnregisterAllEvents()
         return
     end
 
@@ -1925,42 +1945,6 @@ local function RenderAchievements()
     end
 end
 
-local function AutoUntrackCompletedPerksActivities()
-    if not C_PerksActivities then return end
-    if not C_PerksActivities.GetTrackedPerksActivities then return end
-    if not C_PerksActivities.RemoveTrackedPerksActivity then return end
-    local tracked = C_PerksActivities.GetTrackedPerksActivities()
-    if not tracked or #tracked == 0 then return end
-    local activityData = {}
-    if C_PerksActivities.GetPerksActivitiesInfo then
-        local info = C_PerksActivities.GetPerksActivitiesInfo()
-        if info and info.activities then
-            for _, activity in ipairs(info.activities) do
-                if activity and activity.ID then activityData[activity.ID] = activity end
-            end
-        end
-    end
-    for _, activityID in ipairs(tracked) do
-        local activity = activityData[activityID]
-        if activity then
-            local hasRequirements, allDone = false, true
-            if activity.requirementsList then
-                for _, req in ipairs(activity.requirementsList) do
-                    if req and req.requirementText and req.requirementText ~= "" then
-                        hasRequirements = true
-                        if not req.completed then
-                            allDone = false; break
-                        end
-                    end
-                end
-            end
-            if hasRequirements and allDone then
-                C_PerksActivities.RemoveTrackedPerksActivity(activityID)
-            end
-        end
-    end
-end
-
 local function RenderTravelersLog()
     if not C_PerksActivities then return end
     local allActivities = nil
@@ -2244,7 +2228,6 @@ UpdateContent = function()
     ucState.cachedTasks = cachedTasks
 
     addonTable.db.collapsed = addonTable.db.collapsed or {}
-    AutoUntrackCompletedPerksActivities()
     wipe(displayedIDs)
 
     local orderList = addonTable.db.sectionOrderList
@@ -2515,7 +2498,6 @@ hookFrame:SetScript("OnEvent", function(self, event)
     if not ObjectiveTrackerFrame then return end
     if addonTable.db and addonTable.db.enabled then
         ObjectiveTrackerFrame:SetAlpha(0)
-        ObjectiveTrackerFrame:EnableMouse(false)
         DisableTrackerMouse(ObjectiveTrackerFrame)
         StartTrackerMouseTicker()
     end

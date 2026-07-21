@@ -76,6 +76,7 @@ local RESTRICTED_INPUT_METHODS = {
 }
 
 local guardedPins = setmetatable({}, { __mode = "k" })
+local pinAcquisitionGeneration = setmetatable({}, { __mode = "k" })
 
 local function GuardPinInputMethods(pin)
     if guardedPins[pin] then return end
@@ -96,6 +97,7 @@ end
 -- by AcquirePin. Pin pools created before we patch keep Blizzard's secure
 -- originals; pools created afterwards get these identical copies.
 local function OnPinReleased(pinPool, pin)
+    pinAcquisitionGeneration[pin] = (pinAcquisitionGeneration[pin] or 0) + 1
     local map = pin:GetMap()
     if map then
         map:UnregisterPin(pin)
@@ -124,6 +126,8 @@ local function AcquirePin(self, pinTemplate, ...)
     end
 
     local pin, newPin = self.pinPools[pinTemplate]:Acquire()
+    local generation = (pinAcquisitionGeneration[pin] or 0) + 1
+    pinAcquisitionGeneration[pin] = generation
 
     GuardPinInputMethods(pin) -- LunaUITweaks addition, see header comment
 
@@ -170,6 +174,11 @@ local function AcquirePin(self, pinTemplate, ...)
         local pMME = isMouseMotionEnabled
         local pIsBtn = pin:IsObjectType("Button")
         C_Timer.After(0, function()
+            if pinAcquisitionGeneration[p] ~= generation
+                or p.pinTemplate ~= pinTemplate
+                or p:GetMap() ~= self then
+                return
+            end
             if pMCE then
                 p:SetScript("OnMouseUp", OnPinMouseUp)
                 p:SetScript("OnMouseDown", p.OnMouseDown)
