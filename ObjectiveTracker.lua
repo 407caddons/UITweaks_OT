@@ -18,11 +18,16 @@ local scrollChild
 local headerFrame
 local SetupTrackerEvents
 local UpdateContent
+local SyncTrackerEvents
 local autoTrackFrame
 local distanceTicker
 local timerTicker
 local activeTimerBtns = {}       -- questID -> { btn, endTime }
 local trackerHiddenByKeybind = false
+local trackerContentKnown = false
+local trackerContentEmpty = false
+local currentTrackerState
+local trackerStatePendingCombatApply = false
 local scenarioTimerEndTime = nil -- set by WORLD_STATE_TIMER_START; used for scenario countdown
 
 -- Helper: check if we are in a raid instance
@@ -473,6 +478,10 @@ end
 local prevObjectiveState = {}
 local prevQuestComplete = {}
 local tooltipMembers = {}
+-- GameTooltip owns widget pools shared with Area-POI tooltips. Any tooltip
+-- mutation from addon execution can recycle those frames with this addon's
+-- taint, so previews remain disabled until they use an addon-owned tooltip.
+local ENABLE_SHARED_TOOLTIP_PREVIEWS = false
 
 -- Super-track restore
 local savedSuperTrackedQuestID = nil
@@ -732,6 +741,7 @@ end
 local updatePending = false
 local function ScheduleUpdateContent()
     if updatePending then return end
+    trackerContentKnown = false
     updatePending = true
     SafeAfter(UPDATE_THROTTLE_DELAY, function()
         updatePending = false
@@ -880,34 +890,32 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                 if btn.ItemBtn and not InCombatLockdown() then btn.ItemBtn:Hide() end
             end
 
-            if addonTable.db.showTooltipPreview and (questID or achieID or perksActivityID) then
+            if ENABLE_SHARED_TOOLTIP_PREVIEWS and addonTable.db.showTooltipPreview
+                and (questID or achieID or perksActivityID) then
                 btn:SetScript("OnEnter", function(self)
                     if GameTooltip:IsForbidden() then return end
                     if self.questID then
                         GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT", 5, 0)
-                        if InCombatLockdown() then
-                            -- SetHyperlink("quest:...") can embed a reward widget set
-                            -- (e.g. world-boss cache item) in the tooltip; its Setup
-                            -- reads FontString sizes that are secret while our tainted
-                            -- execution runs in combat → arithmetic error in
-                            -- Blizzard_UIWidgetTemplateBase. Build a plain text
-                            -- tooltip in combat instead.
-                            local title = C_QuestLog.GetTitleForQuestID(self.questID)
-                            GameTooltip:SetText(title or QUEST_LOG or "Quest", 1, 0.82, 0)
-                            local objectives = C_QuestLog.GetQuestObjectives(self.questID)
-                            if objectives then
-                                for _, obj in ipairs(objectives) do
-                                    if obj.text and obj.text ~= "" then
-                                        if obj.finished then
-                                            GameTooltip:AddLine(obj.text, 0.5, 0.5, 0.5)
-                                        else
-                                            GameTooltip:AddLine(obj.text, 0.8, 0.8, 0.8)
-                                        end
+                        -- Never use GameTooltip:SetHyperlink here. Quest and
+                        -- achievement hyperlinks may build shared UI-widget frames
+                        -- while execution is tainted by this addon. Blizzard later
+                        -- reuses those frames for Area-POI tooltips, where secret
+                        -- FontString measurements then fail. Plain text does not
+                        -- acquire anything from the shared widget pool.
+                        local title = C_QuestLog.GetTitleForQuestID(self.questID)
+                        if not Secret.CanAccessValue(title) then title = nil end
+                        GameTooltip:SetText(title or QUEST_LOG or "Quest", 1, 0.82, 0)
+                        local objectives = C_QuestLog.GetQuestObjectives(self.questID)
+                        if objectives then
+                            for _, obj in ipairs(objectives) do
+                                if obj.text and Secret.CanAccessValue(obj.text) and obj.text ~= "" then
+                                    if obj.finished then
+                                        GameTooltip:AddLine(obj.text, 0.5, 0.5, 0.5)
+                                    else
+                                        GameTooltip:AddLine(obj.text, 0.8, 0.8, 0.8)
                                     end
                                 end
                             end
-                        else
-                            GameTooltip:SetHyperlink("quest:" .. self.questID)
                         end
                         if IsInGroup() then
                             wipe(tooltipMembers)
@@ -1010,7 +1018,24 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                         GameTooltip:Show()
                     elseif self.achieID then
                         GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT", 5, 0)
-                        GameTooltip:SetHyperlink("achievement:" .. self.achieID)
+                        local _, name, _, _, _, _, _, description = GetAchievementInfo(self.achieID)
+                        if not Secret.CanAccessValue(name) then name = nil end
+                        if not Secret.CanAccessValue(description) then description = nil end
+                        GameTooltip:SetText(name or ACHIEVEMENTS or "Achievement", 1, 0.82, 0)
+                        if description and description ~= "" then
+                            GameTooltip:AddLine(description, 0.8, 0.8, 0.8, true)
+                        end
+                        local numCriteria = GetAchievementNumCriteria(self.achieID) or 0
+                        for i = 1, numCriteria do
+                            local criteria, _, criterionDone = GetAchievementCriteriaInfo(self.achieID, i)
+                            if criteria and Secret.CanAccessValue(criteria) and criteria ~= "" then
+                                if criterionDone then
+                                    GameTooltip:AddLine(criteria, 0.5, 1, 0.5)
+                                else
+                                    GameTooltip:AddLine(criteria, 0.8, 0.8, 0.8)
+                                end
+                            end
+                        end
                         GameTooltip:Show()
                     elseif self.perksActivityID then
                         GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT", 5, 0)
@@ -1060,60 +1085,53 @@ end
 -- Blizzard tracker suppression
 -- ============================================================
 
--- EnableMouse(false) on the parent doesn't propagate to children — quest buttons
--- and module frames are still clickable even when invisible. Recursively disable
--- mouse on all Frame children so clicks pass through the hidden tracker.
---
--- Skip any subtree whose root name contains "Widget": UIWidgetObjectiveTracker
--- and the WidgetContainer children of ScenarioObjectiveTracker / other modules
--- hold frames pulled from the shared UIWidgetManager pool. Those same pool
--- frames are later re-acquired for area-POI tooltip widgets (e.g. widget set
--- 1846). Calling EnableMouse — or any method — on a pool frame leaves a
--- taint marker that survives pool release/re-acquire and causes Blizzard's
--- widget Setup() to fail with a secret-value arithmetic error on textHeight
--- etc. Skipping by name keeps us off the pool entirely.
-local trackerMouseStates = setmetatable({}, { __mode = "k" })
+-- Hide the native tracker as one top-level unit. Reparenting it to a hidden
+-- frame also suppresses all descendant rendering and mouse input without ever
+-- touching Blizzard's child frames or shared UI-widget pools. SetParent is
+-- protected in combat, so alpha is used only as a temporary fallback and the
+-- requested parent change is completed when lockdown ends.
+local nativeTrackerHiddenParent = CreateFrame("Frame", "LunaObjectiveTrackerHiddenParent", UIParent)
+nativeTrackerHiddenParent:Hide()
 
-local function DisableTrackerMouse(frame, depth)
-    depth = depth or 0
-    if depth > 10 then return end
-    local name = frame.GetName and frame:GetName()
-    if name and name:find("Widget") then return end
-    if trackerMouseStates[frame] == nil then
-        trackerMouseStates[frame] = frame:IsMouseEnabled()
-    end
-    frame:EnableMouse(false)
-    for i = 1, frame:GetNumChildren() do
-        DisableTrackerMouse(select(i, frame:GetChildren()), depth + 1)
-    end
-end
+local nativeTrackerOriginalParent
+local nativeTrackerReparented = false
+local nativeTrackerShouldBeHidden = false
+local ApplyNativeTrackerSuppression
 
--- Ticker: keeps the Blizzard tracker visually hidden and mouse-disabled while
--- the custom tracker is active. Runs every 0.5s, re-applying:
---   * SetAlpha(0) and EnableMouse(false) on the top frame (visual-only calls,
---     safe on Blizzard frames per project taint rules)
---   * DisableTrackerMouse recursive child walk (catches new children Blizzard
---     adds dynamically after quest/objective updates)
---
--- We deliberately do NOT hooksecurefunc(ObjectiveTrackerFrame, "Show", ...) to
--- react to Blizzard re-showing the tracker. Frame-object hooksecurefunc on a
--- Blizzard frame taints execution context and propagates secret-value errors
--- (silverWidth / copperWidth in MoneyFrame, etc.) into Blizzard's secure
--- tooltip chain. Polling at 0.5s costs nothing and keeps us off that path.
-local trackerMouseTicker = nil
-local function StartTrackerMouseTicker()
-    if trackerMouseTicker then return end
-    trackerMouseTicker = C_Timer.NewTicker(0.5, function()
-        if ObjectiveTrackerFrame and addonTable.db and addonTable.db.enabled then
-            ObjectiveTrackerFrame:SetAlpha(0)
-            DisableTrackerMouse(ObjectiveTrackerFrame)
+local nativeTrackerSuppressionFrame = CreateFrame("Frame")
+nativeTrackerSuppressionFrame:SetScript("OnEvent", function(self)
+    self:UnregisterEvent("PLAYER_REGEN_ENABLED")
+    ApplyNativeTrackerSuppression(nativeTrackerShouldBeHidden)
+end)
+
+ApplyNativeTrackerSuppression = function(shouldHide)
+    nativeTrackerShouldBeHidden = shouldHide and true or false
+    local frame = ObjectiveTrackerFrame
+    if not frame then return end
+
+    if InCombatLockdown() then
+        frame:SetAlpha(nativeTrackerShouldBeHidden and 0 or 1)
+        nativeTrackerSuppressionFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+        return
+    end
+
+    nativeTrackerSuppressionFrame:UnregisterEvent("PLAYER_REGEN_ENABLED")
+    if nativeTrackerShouldBeHidden then
+        if not nativeTrackerReparented then
+            nativeTrackerOriginalParent = frame:GetParent() or UIParent
+            nativeTrackerReparented = true
         end
-    end)
-end
-local function StopTrackerMouseTicker()
-    if trackerMouseTicker then
-        trackerMouseTicker:Cancel()
-        trackerMouseTicker = nil
+        if frame:GetParent() ~= nativeTrackerHiddenParent then
+            frame:SetParent(nativeTrackerHiddenParent)
+        end
+        frame:SetAlpha(1)
+    else
+        if nativeTrackerReparented then
+            frame:SetParent(nativeTrackerOriginalParent or UIParent)
+            nativeTrackerReparented = false
+            nativeTrackerOriginalParent = nil
+        end
+        frame:SetAlpha(1)
     end
 end
 
@@ -1210,15 +1228,7 @@ local function SetupCustomTracker()
     end)
 end
 
-local function RestoreTrackerMouse()
-    for frame, wasEnabled in pairs(trackerMouseStates) do
-        frame:EnableMouse(wasEnabled)
-        trackerMouseStates[frame] = nil
-    end
-end
-
 local function StopRuntime()
-    StopTrackerMouseTicker()
     if distanceTicker then
         distanceTicker:Cancel()
         distanceTicker = nil
@@ -1239,34 +1249,115 @@ local function StopRuntime()
     end
 end
 
+local function EvaluateTrackerState()
+    if not addonTable.db or not addonTable.db.enabled then return "disabled" end
+    if trackerHiddenByKeybind then return "keybind-hidden" end
+    if (addonTable.db.hideInMPlus and C_ChallengeMode.IsChallengeModeActive())
+        or (addonTable.db.hideInRaid and IsInRaidInstance()) then
+        return "instance-hidden"
+    end
+    if addonTable.db.hideInCombat and InCombatLockdown() then return "combat-hidden" end
+    if trackerContentKnown and trackerContentEmpty and addonTable.db.locked then return "empty-hidden" end
+    return "visible"
+end
+
+local function StopContentTickers()
+    if distanceTicker then
+        distanceTicker:Cancel()
+        distanceTicker = nil
+    end
+    if timerTicker then
+        timerTicker:Cancel()
+        timerTicker = nil
+    end
+end
+
+local function SyncContentTickers(state)
+    StopContentTickers()
+    if state ~= "visible" then return end
+
+    local interval = addonTable.db.distanceUpdateInterval or 0
+    if interval > 0 then
+        distanceTicker = C_Timer.NewTicker(interval, function()
+            if EvaluateTrackerState() == "visible" and not InCombatLockdown() then
+                UpdateContent()
+            end
+        end)
+    end
+
+    if addonTable.db.showQuestCountdown then
+        timerTicker = C_Timer.NewTicker(1.0, function()
+            for _, entry in pairs(activeTimerBtns) do
+                local btn = entry.btn
+                if btn and not btn.released and btn:IsShown() then
+                    local display, color
+                    if entry.isElapsed then
+                        display = GetTime() - entry.startTime
+                        color = "FFFFFF"
+                    else
+                        display = entry.endTime - GetTime()
+                        if display < 0 then display = 0 end
+                        color = display > 300 and "00FF00" or display > 60 and "FFFF00" or "FF4444"
+                    end
+                    local m = math.floor(display / 60)
+                    local s = math.floor(display % 60)
+                    btn.Text:SetText(string.format("|cFF%s%02d:%02d|r", color, m, s))
+                end
+            end
+        end)
+    end
+end
+
+local function ApplyTrackerState(force)
+    local state = EvaluateTrackerState()
+    local inCombat = InCombatLockdown()
+    local changed = force or state ~= currentTrackerState or trackerStatePendingCombatApply
+    ApplyNativeTrackerSuppression(state ~= "disabled")
+
+    if changed then
+        if trackerFrame then
+            if inCombat then
+                trackerFrame:SetAlpha(state == "visible" and 1 or 0)
+                trackerStatePendingCombatApply = true
+            else
+                trackerStatePendingCombatApply = false
+                trackerFrame:SetAlpha(1)
+                if state == "visible" then
+                    if addonTable.db.hideInCombat then
+                        RegisterStateDriver(trackerFrame, "visibility", "[combat] hide; show")
+                    else
+                        UnregisterStateDriver(trackerFrame, "visibility")
+                    end
+                    trackerFrame:Show()
+                else
+                    UnregisterStateDriver(trackerFrame, "visibility")
+                    trackerFrame:Hide()
+                end
+            end
+        end
+        currentTrackerState = state
+        SyncContentTickers(state)
+        if SyncTrackerEvents then SyncTrackerEvents(state) end
+    end
+    return state
+end
+
 -- ============================================================
 -- UpdateSettings
 -- ============================================================
 function addonTable.ObjectiveTracker.UpdateSettings()
     local enabled = addonTable.db.enabled
 
-    if enabled then
-        if ObjectiveTrackerFrame then
-            ObjectiveTrackerFrame:SetAlpha(0)
-            DisableTrackerMouse(ObjectiveTrackerFrame)
-            StartTrackerMouseTicker()
-        end
-    else
+    if not enabled then
         StopRuntime()
+        ApplyTrackerState(true)
         if ObjectiveTrackerFrame then
-            ObjectiveTrackerFrame:SetAlpha(1)
             ObjectiveTrackerFrame:SetScale(1)
-        end
-        RestoreTrackerMouse()
-        if trackerFrame then
-            if not InCombatLockdown() then
-                UnregisterStateDriver(trackerFrame, "visibility")
-                trackerFrame:UnregisterAllEvents()
-                trackerFrame:Hide()
-            end
         end
         return
     end
+
+    trackerContentKnown = false
 
     if enabled and addonTable.db.autoTrackQuests then
         autoTrackFrame:RegisterEvent("QUEST_ACCEPTED")
@@ -1276,20 +1367,6 @@ function addonTable.ObjectiveTracker.UpdateSettings()
 
     SetupCustomTracker()
     SetupTrackerEvents()
-
-    local inCombat = InCombatLockdown()
-    if not inCombat then
-        if addonTable.db.hideInCombat then
-            RegisterStateDriver(trackerFrame, "visibility", "[combat] hide; show")
-        else
-            UnregisterStateDriver(trackerFrame, "visibility")
-            trackerFrame:Show()
-        end
-        if (addonTable.db.hideInMPlus and C_ChallengeMode.IsChallengeModeActive())
-            or (addonTable.db.hideInRaid and IsInRaidInstance()) then
-            trackerFrame:Hide()
-        end
-    end
 
     trackerBody:SetSize(addonTable.db.width, addonTable.db.height)
     trackerBody:SetFrameStrata(addonTable.db.strata or "LOW")
@@ -1347,47 +1424,6 @@ function addonTable.ObjectiveTracker.UpdateSettings()
         trackerBody:SetBackdropBorderColor(1, 1, 1, 1)
     end
 
-    -- Distance update ticker
-    if distanceTicker then
-        distanceTicker:Cancel()
-        distanceTicker = nil
-    end
-    local interval = addonTable.db.distanceUpdateInterval or 0
-    if interval > 0 then
-        distanceTicker = C_Timer.NewTicker(interval, function()
-            if trackerFrame and trackerFrame:IsShown() and not InCombatLockdown() then
-                UpdateContent()
-            end
-        end)
-    end
-
-    -- Quest countdown timer ticker (live MM:SS updates)
-    if timerTicker then
-        timerTicker:Cancel()
-        timerTicker = nil
-    end
-    if addonTable.db.enabled and addonTable.db.showQuestCountdown then
-        timerTicker = C_Timer.NewTicker(1.0, function()
-            for _, entry in pairs(activeTimerBtns) do
-                local btn = entry.btn
-                if btn and not btn.released and btn:IsShown() then
-                    local display, color
-                    if entry.isElapsed then
-                        display = GetTime() - entry.startTime
-                        color = "FFFFFF"
-                    else
-                        display = entry.endTime - GetTime()
-                        if display < 0 then display = 0 end
-                        color = display > 300 and "00FF00" or display > 60 and "FFFF00" or "FF4444"
-                    end
-                    local m = math.floor(display / 60)
-                    local s = math.floor(display % 60)
-                    btn.Text:SetText(string.format("|cFF%s%02d:%02d|r", color, m, s))
-                end
-            end
-        end)
-    end
-
     -- Mute/unmute default Blizzard quest sounds
     local shouldMute = addonTable.db.enabled and addonTable.db.muteDefaultQuestSounds
     if shouldMute and not questSoundsMuted then
@@ -1401,6 +1437,8 @@ function addonTable.ObjectiveTracker.UpdateSettings()
         end
         questSoundsMuted = false
     end
+
+    ApplyTrackerState(true)
 end
 
 local function RenderSingleWQ(questID, superTrackedQuestID)
@@ -2176,31 +2214,7 @@ local sectionRenderers = {
 
 UpdateContent = function()
     if not trackerFrame then return end
-    if trackerHiddenByKeybind then return end
-
-    local inCombat = InCombatLockdown()
-    local enabled = addonTable.db.enabled
-    local shouldHideInstance = enabled and (
-        (addonTable.db.hideInMPlus and C_ChallengeMode.IsChallengeModeActive())
-        or (addonTable.db.hideInRaid and IsInRaidInstance())
-    )
-
-    if not enabled or shouldHideInstance then
-        if not inCombat then
-            UnregisterStateDriver(trackerFrame, "visibility")
-            trackerFrame:Hide()
-        end
-        return
-    end
-
-    if not inCombat then
-        if addonTable.db.hideInCombat then
-            RegisterStateDriver(trackerFrame, "visibility", "[combat] hide; show")
-        else
-            UnregisterStateDriver(trackerFrame, "visibility")
-            trackerFrame:Show()
-        end
-    end
+    if ApplyTrackerState() ~= "visible" then return end
 
     ReleaseItems()
 
@@ -2314,13 +2328,9 @@ UpdateContent = function()
         proximityTrackedWQ = nil
     end
 
-    if ucState.yOffset == -5 and addonTable.db.locked then
-        if not inCombat then
-            UnregisterStateDriver(trackerFrame, "visibility")
-            trackerFrame:Hide()
-        end
-        return
-    end
+    trackerContentKnown = true
+    trackerContentEmpty = ucState.yOffset == -5
+    if ApplyTrackerState() ~= "visible" then return end
 
     local totalHeight = math.abs(ucState.yOffset)
     scrollChild:SetHeight(math.max(totalHeight, 50))
@@ -2333,14 +2343,9 @@ addonTable.ObjectiveTracker.UpdateContent = UpdateContent
 function LunaUITweaks_ToggleTracker()
     if not trackerFrame or not addonTable.db.enabled then return end
     if InCombatLockdown() then return end
-    if trackerHiddenByKeybind then
-        trackerHiddenByKeybind = false
-        UpdateContent()
-    else
-        trackerHiddenByKeybind = true
-        UnregisterStateDriver(trackerFrame, "visibility")
-        trackerFrame:Hide()
-    end
+    trackerHiddenByKeybind = not trackerHiddenByKeybind
+    trackerContentKnown = false
+    if ApplyTrackerState(true) == "visible" then UpdateContent() end
 end
 
 -- Auto-track new quests
@@ -2362,41 +2367,57 @@ end)
 -- ============================================================
 -- Events
 -- ============================================================
-local function RegisterTrackerEvents(frame)
-    frame:RegisterEvent("QUEST_WATCH_LIST_CHANGED")
-    frame:RegisterEvent("TRACKED_ACHIEVEMENT_LIST_CHANGED")
-    frame:RegisterEvent("CONTENT_TRACKING_UPDATE")
-    frame:RegisterEvent("CONTENT_TRACKING_LIST_UPDATE")
-    frame:RegisterEvent("QUEST_LOG_UPDATE")
-    frame:RegisterEvent("PLAYER_ENTERING_WORLD")
-    frame:RegisterEvent("PLAYER_REGEN_DISABLED")
-    frame:RegisterEvent("PLAYER_REGEN_ENABLED")
-    frame:RegisterEvent("CHALLENGE_MODE_START")
-    frame:RegisterEvent("CHALLENGE_MODE_COMPLETED")
-    frame:RegisterEvent("CHALLENGE_MODE_RESET")
-    frame:RegisterEvent("SUPER_TRACKING_CHANGED")
-    frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
-    frame:RegisterEvent("ZONE_CHANGED")
-    frame:RegisterEvent("TASK_PROGRESS_UPDATE")
-    frame:RegisterEvent("QUEST_ACCEPTED")
-    frame:RegisterEvent("QUEST_REMOVED")
-    frame:RegisterEvent("PERKS_ACTIVITIES_TRACKED_LIST_CHANGED")
-    frame:RegisterEvent("PERKS_ACTIVITIES_TRACKED_UPDATED")
-    frame:RegisterEvent("SCENARIO_UPDATE")
-    frame:RegisterEvent("SCENARIO_CRITERIA_UPDATE")
-    frame:RegisterEvent("SCENARIO_COMPLETED")
-    frame:RegisterEvent("WORLD_STATE_TIMER_START")
-    frame:RegisterEvent("WORLD_STATE_TIMER_STOP")
+local VISIBILITY_EVENTS = {
+    "PLAYER_ENTERING_WORLD",
+    "PLAYER_REGEN_DISABLED",
+    "PLAYER_REGEN_ENABLED",
+    "CHALLENGE_MODE_START",
+    "CHALLENGE_MODE_COMPLETED",
+    "CHALLENGE_MODE_RESET",
+    "ZONE_CHANGED_NEW_AREA",
+    "ZONE_CHANGED",
+}
+
+local CONTENT_EVENTS = {
+    "QUEST_WATCH_LIST_CHANGED",
+    "TRACKED_ACHIEVEMENT_LIST_CHANGED",
+    "CONTENT_TRACKING_UPDATE",
+    "CONTENT_TRACKING_LIST_UPDATE",
+    "QUEST_LOG_UPDATE",
+    "SUPER_TRACKING_CHANGED",
+    "TASK_PROGRESS_UPDATE",
+    "QUEST_ACCEPTED",
+    "QUEST_REMOVED",
+    "PERKS_ACTIVITIES_TRACKED_LIST_CHANGED",
+    "PERKS_ACTIVITIES_TRACKED_UPDATED",
+    "SCENARIO_UPDATE",
+    "SCENARIO_CRITERIA_UPDATE",
+    "SCENARIO_COMPLETED",
+    "WORLD_STATE_TIMER_START",
+    "WORLD_STATE_TIMER_STOP",
+}
+
+SyncTrackerEvents = function(state)
+    if not trackerFrame then return end
+    trackerFrame:UnregisterAllEvents()
+    if state == "disabled" then
+        if InCombatLockdown() then trackerFrame:RegisterEvent("PLAYER_REGEN_ENABLED") end
+        return
+    end
+    for _, event in ipairs(VISIBILITY_EVENTS) do trackerFrame:RegisterEvent(event) end
+    if state == "visible" or state == "combat-hidden" or state == "empty-hidden" then
+        for _, event in ipairs(CONTENT_EVENTS) do trackerFrame:RegisterEvent(event) end
+    end
 end
 
 SetupTrackerEvents = function()
     if not trackerFrame then return end
-    RegisterTrackerEvents(trackerFrame)
     trackerFrame:SetScript("OnEvent", function(self, event, ...)
         if event == "PLAYER_ENTERING_WORLD" then
+            trackerContentKnown = false
             SafeAfter(2, UpdateContent)
         elseif event == "PLAYER_REGEN_DISABLED" then
-            -- handled by StateDriver
+            ApplyTrackerState()
         elseif event == "PLAYER_REGEN_ENABLED" then
             if pendingQuestItemUpdate then
                 pendingQuestItemUpdate = nil
@@ -2466,6 +2487,7 @@ SetupTrackerEvents = function()
             ScheduleUpdateContent()
         end
     end)
+    SyncTrackerEvents(EvaluateTrackerState())
 end
 
 -- ============================================================
@@ -2497,9 +2519,7 @@ hookFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 hookFrame:SetScript("OnEvent", function(self, event)
     if not ObjectiveTrackerFrame then return end
     if addonTable.db and addonTable.db.enabled then
-        ObjectiveTrackerFrame:SetAlpha(0)
-        DisableTrackerMouse(ObjectiveTrackerFrame)
-        StartTrackerMouseTicker()
+        ApplyNativeTrackerSuppression(true)
     end
     self:UnregisterAllEvents()
 end)
