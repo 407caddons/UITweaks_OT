@@ -1,4 +1,5 @@
 local addonName, addonTable = ...
+if addonTable.disabledByEllesmere then return end
 
 -- TWW's ChatConfigCheckButtonTemplate ships a $parentText FontString whose
 -- font/size/draw-layer state is unreliable for adjacent label use, so we

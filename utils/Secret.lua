@@ -84,7 +84,7 @@ function Secret.SafeConcat(fallback, ...)
     local parts = {}
     for i = 1, count do
         local part = select(i, ...)
-        if part == nil or not Secret.CanAccessValue(part) then
+        if not Secret.CanAccessValue(part) or part == nil then
             return fallback
         end
         parts[i] = tostring(part)

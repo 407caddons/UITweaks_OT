@@ -1,5 +1,15 @@
 local addonName, addonTable = ...
 
+-- OptionalDeps makes an enabled Ellesmere tracker load before this addon.
+-- Stand down before registering events, bindings, or configuration panels;
+-- do not change the saved enabled preference or touch Blizzard's tracker.
+addonTable.disabledByEllesmere = C_AddOns.IsAddOnLoaded("EllesmereUIQuestTracker")
+if addonTable.disabledByEllesmere then
+    -- A previously saved toggle binding may still invoke this global.
+    function LunaUITweaks_ToggleTracker() end
+    return
+end
+
 addonTable.Core = {}
 addonTable.ObjectiveTracker = {}
 

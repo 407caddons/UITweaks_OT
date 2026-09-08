@@ -1,4 +1,5 @@
 local addonName, addonTable = ...
+if addonTable.disabledByEllesmere then return end
 addonTable.ObjectiveTracker = {}
 
 local SafeAfter = addonTable.Core and addonTable.Core.SafeAfter or function(delay, func)
@@ -11,8 +12,19 @@ end
 
 local Secret = addonTable.Secret
 
+-- Check accessibility before comparisons/arithmetic: a secret number is still
+-- truthy, so `measurement or fallback` does not make it safe.
+local function SafeTextMeasurement(value, fallback)
+    if not Secret.CanAccessValue(value) then return fallback end
+    if type(value) ~= "number" or value ~= value or value < 0 or value == math.huge then
+        return fallback
+    end
+    return value
+end
+
 local trackerFrame
 local trackerBody
+local questItemContainer
 local scrollFrame
 local scrollChild
 local headerFrame
@@ -28,6 +40,8 @@ local trackerContentKnown = false
 local trackerContentEmpty = false
 local currentTrackerState
 local trackerStatePendingCombatApply = false
+local pendingSettingsUpdate = false
+local pendingMoveStop = false
 local scenarioTimerEndTime = nil -- set by WORLD_STATE_TIMER_START; used for scenario countdown
 
 -- Helper: check if we are in a raid instance
@@ -52,6 +66,11 @@ local pendingQuestItemUpdate = false
 local function UpdateQuestItemButton()
     if InCombatLockdown() then
         pendingQuestItemUpdate = true
+        return
+    end
+    if not addonTable.db or not addonTable.db.enabled then
+        questItemButton:SetAttribute("type", nil)
+        questItemButton:SetAttribute("item", nil)
         return
     end
     local questID = C_SuperTrack.GetSuperTrackedQuestID()
@@ -214,7 +233,7 @@ local function AcquireItem()
     toggleBtn:Hide()
     btn.ToggleBtn = toggleBtn
 
-    local itemBtn = CreateFrame("Button", nil, UIParent, "SecureActionButtonTemplate")
+    local itemBtn = CreateFrame("Button", nil, questItemContainer, "SecureActionButtonTemplate")
     itemBtn:SetSize(20, 20)
     itemBtn:Hide()
     itemBtn:RegisterForClicks("AnyUp", "AnyDown")
@@ -393,7 +412,7 @@ local function BuildTimerBtn(displaySecs, color)
     local s = math.floor(displaySecs % 60)
     btn.Text:SetText(string.format("|cFF%s%02d:%02d|r", color, m, s))
 
-    local textHeight = btn.Text:GetStringHeight() or timerSize
+    local textHeight = SafeTextMeasurement(btn.Text:GetStringHeight(), timerSize)
     local lineHeight = math.max(textHeight, timerSize)
     btn:SetHeight(lineHeight + 2)
     ucState.yOffset = ucState.yOffset - (lineHeight + (ucState.questPadding or 2))
@@ -792,14 +811,14 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                 btn.ToggleBtn.Text:SetText("-")
             end
 
-            local textWidth = btn.Text:GetStringWidth()
+            local textWidth = SafeTextMeasurement(btn.Text:GetStringWidth(), 0)
             btn.ToggleBtn:SetPoint("LEFT", btn.Text, "LEFT", textWidth + 5, 0)
         else
             btn.ToggleBtn:Hide()
         end
 
         btn:EnableMouse(false)
-        local sh = btn.Text:GetStringHeight()
+        local sh = SafeTextMeasurement(btn.Text:GetStringHeight(), ucState.sectionHeaderSize)
         local sLineH = (sh and sh > 0) and sh or ucState.sectionHeaderSize
         btn:SetHeight(sLineH + 4)
         ucState.yOffset = ucState.yOffset - (sLineH + 6)
@@ -822,7 +841,7 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                 end
             end
 
-            local textHeight = btn.Text:GetStringHeight() or currentSize
+            local textHeight = SafeTextMeasurement(btn.Text:GetStringHeight(), currentSize)
             local lineHeight = math.max(textHeight, currentSize)
             btn:SetHeight(lineHeight + 2)
             ucState.yOffset = ucState.yOffset - (lineHeight + ucState.questPadding)
@@ -1072,7 +1091,7 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                 btn:SetScript("OnLeave", nil)
             end
 
-            local textHeight = btn.Text:GetStringHeight() or currentSize
+            local textHeight = SafeTextMeasurement(btn.Text:GetStringHeight(), currentSize)
             local lineHeight = math.max(textHeight, currentSize)
             btn:SetHeight(lineHeight + 2)
             ucState.yOffset = ucState.yOffset - (lineHeight + 4)
@@ -1142,16 +1161,17 @@ local function SetupCustomTracker()
     if trackerFrame then return end
     local settings = addonTable.db
 
-    -- trackerFrame carries SecureHandlerStateTemplate so its visibility can be
-    -- driven by RegisterStateDriver (combat-safe show/hide). Once a state
-    -- driver is registered on a frame, WoW permanently marks that frame
-    -- protected: any later SetSize/SetPoint/etc. from insecure code is
-    -- blocked with ADDON_ACTION_BLOCKED, even outside combat. So trackerFrame
-    -- itself is never resized/repositioned/backdropped — it's just a
-    -- full-screen secure wrapper. All actual geometry lives on trackerBody,
-    -- a plain child frame that's always safe to size/move/resize.
+    -- Secure visibility is separate from layout. Layout and secure button
+    -- creation are deferred during combat; a plain child is not a blanket
+    -- exemption from protected-frame restrictions.
     trackerFrame = CreateFrame("Frame", "UIThingsTrackerFrame", UIParent, "SecureHandlerStateTemplate")
     trackerFrame:SetAllPoints(UIParent)
+
+    -- Item buttons follow tracker visibility but never remain clickable over
+    -- stale rows during combat. Keep them outside the scrolling row hierarchy.
+    questItemContainer = CreateFrame("Frame", nil, trackerFrame, "SecureHandlerStateTemplate")
+    questItemContainer:SetAllPoints(UIParent)
+    RegisterStateDriver(questItemContainer, "visibility", "[combat] hide; show")
 
     trackerBody = CreateFrame("Frame", "UIThingsTrackerBody", trackerFrame, "BackdropTemplate")
     trackerBody:SetMovable(true)
@@ -1186,9 +1206,10 @@ local function SetupCustomTracker()
     trackerBody:EnableMouse(true)
     trackerBody:RegisterForDrag("LeftButton")
     trackerBody:SetScript("OnDragStart", function(self)
-        if not addonTable.db.locked then self:StartMoving() end
+        if not InCombatLockdown() and not addonTable.db.locked then self:StartMoving() end
     end)
     trackerBody:SetScript("OnDragStop", function(self)
+        if InCombatLockdown() then pendingMoveStop = true; return end
         self:StopMovingOrSizing()
         local point, _, relativePoint, x, y = self:GetPoint()
         x = math.floor(x + 0.5)
@@ -1218,9 +1239,10 @@ local function SetupCustomTracker()
     rTex:SetAllPoints()
     resizeHandle:EnableMouse(true)
     resizeHandle:SetScript("OnMouseDown", function()
-        if not addonTable.db.locked then trackerBody:StartSizing("BOTTOMRIGHT") end
+        if not InCombatLockdown() and not addonTable.db.locked then trackerBody:StartSizing("BOTTOMRIGHT") end
     end)
     resizeHandle:SetScript("OnMouseUp", function()
+        if InCombatLockdown() then pendingMoveStop = true; return end
         trackerBody:StopMovingOrSizing()
         local w, h = trackerBody:GetSize()
         addonTable.db.width = w
@@ -1311,7 +1333,8 @@ end
 local function ApplyTrackerState(force)
     local state = EvaluateTrackerState()
     local inCombat = InCombatLockdown()
-    local changed = force or state ~= currentTrackerState or trackerStatePendingCombatApply
+    local changed = force or state ~= currentTrackerState
+        or (trackerStatePendingCombatApply and not inCombat)
     ApplyNativeTrackerSuppression(state ~= "disabled")
 
     if changed then
@@ -1346,11 +1369,17 @@ end
 -- UpdateSettings
 -- ============================================================
 function addonTable.ObjectiveTracker.UpdateSettings()
+    if InCombatLockdown() then
+        pendingSettingsUpdate = true
+        return
+    end
+    pendingSettingsUpdate = false
     local enabled = addonTable.db.enabled
 
     if not enabled then
         StopRuntime()
         ApplyTrackerState(true)
+        UpdateQuestItemButton()
         if ObjectiveTrackerFrame then
             ObjectiveTrackerFrame:SetScale(1)
         end
@@ -1440,6 +1469,21 @@ function addonTable.ObjectiveTracker.UpdateSettings()
 
     ApplyTrackerState(true)
 end
+
+-- Independent of trackerFrame: settings can be enabled during combat before
+-- the custom frame exists, or disabled while its content events are stopped.
+local settingsReplayFrame = CreateFrame("Frame")
+settingsReplayFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+settingsReplayFrame:SetScript("OnEvent", function()
+    if pendingMoveStop and trackerBody then
+        pendingMoveStop = false
+        trackerBody:StopMovingOrSizing()
+    end
+    if pendingSettingsUpdate then
+        addonTable.ObjectiveTracker.UpdateSettings()
+        if UpdateContent then UpdateContent() end
+    end
+end)
 
 local function RenderSingleWQ(questID, superTrackedQuestID)
     if not displayedIDs[questID] then
@@ -1694,9 +1738,9 @@ local function RenderQuests()
                     UpdateContent()
                 end)
                 btn.ToggleBtn.Text:SetText(isCollapsed and "+" or "-")
-                local textWidth = btn.Text:GetStringWidth()
+                local textWidth = SafeTextMeasurement(btn.Text:GetStringWidth(), 0)
                 btn.ToggleBtn:SetPoint("LEFT", btn.Text, "LEFT", textWidth + 5, 0)
-                local gh = btn.Text:GetStringHeight()
+                local gh = SafeTextMeasurement(btn.Text:GetStringHeight(), ucState.questNameSize)
                 local gLineH = (gh and gh > 0) and gh or ucState.questNameSize
                 btn:SetHeight(gLineH + 4)
                 ucState.yOffset = ucState.yOffset - (gLineH + 4)
@@ -2187,7 +2231,7 @@ local function RenderCampaignQuests()
                     UpdateContent()
                 end)
                 btn.ToggleBtn.Text:SetText(isCollapsed and "+" or "-")
-                local textWidth = btn.Text:GetStringWidth()
+                local textWidth = SafeTextMeasurement(btn.Text:GetStringWidth(), 0)
                 btn.ToggleBtn:SetPoint("LEFT", btn.Text, "LEFT", textWidth + 5, 0)
                 ucState.yOffset = ucState.yOffset - (ucState.questNameSize + 4)
                 if not isCollapsed then
@@ -2215,6 +2259,9 @@ local sectionRenderers = {
 UpdateContent = function()
     if not trackerFrame then return end
     if ApplyTrackerState() ~= "visible" then return end
+    -- Preserve rows and secure item attributes until combat ends. The regen
+    -- event rebuilds from current data; countdown text has its own ticker.
+    if InCombatLockdown() then return end
 
     ReleaseItems()
 

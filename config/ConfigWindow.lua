@@ -1,4 +1,5 @@
 local addonName, addonTable = ...
+if addonTable.disabledByEllesmere then return end
 
 -- This config window owns the tracker's settings UI. The shared-DB integration
 -- with LunaUITweaks (UIThingsDB.tracker) is handled in Core.lua; the panel itself
@@ -11,8 +12,21 @@ local configWindow
 function addonTable.Config.Initialize()
     if configWindow then return end
 
-    configWindow = CreateFrame("Frame", "LunaObjTrackerConfigWindow", UIParent, "BasicFrameTemplateWithInset")
-    configWindow:SetSize(680, 670)
+    configWindow = CreateFrame("Frame", "LunaObjTrackerConfigWindow", UIParent)
+    configWindow:SetSize(900, 650)
+    local function FitToScreen()
+        local width, height = UIParent:GetSize()
+        if width and height and width > 0 and height > 0 then
+            configWindow:SetScale(math.min(1, (width - 24) / 900, (height - 24) / 650))
+        end
+    end
+    configWindow:HookScript("OnShow", FitToScreen)
+    configWindow:RegisterEvent("DISPLAY_SIZE_CHANGED")
+    configWindow:RegisterEvent("UI_SCALE_CHANGED")
+    configWindow:SetScript("OnEvent", FitToScreen)
+    FitToScreen()
+    configWindow:SetClampedToScreen(true)
+    addonTable.ConfigTheme.Window(configWindow)
     configWindow:SetPoint("CENTER")
     configWindow:SetMovable(true)
     configWindow:EnableMouse(true)
@@ -33,17 +47,12 @@ function addonTable.Config.Initialize()
     end)
     configWindow:Hide()
 
-    configWindow.TitleText:SetText("Luna's Objective Tracker")
+    configWindow.TitleText:SetText("LUNA  /  OBJECTIVE TRACKER")
 
-    -- Content area with scroll
-    local scrollFrame = CreateFrame("ScrollFrame", "LunaObjTrackerConfigScroll", configWindow,
-        "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", 10, -30)
-    scrollFrame:SetPoint("BOTTOMRIGHT", -30, 10)
-
-    local scrollChild = CreateFrame("Frame", nil, scrollFrame)
-    scrollChild:SetSize(scrollFrame:GetWidth(), 1400)
-    scrollFrame:SetScrollChild(scrollChild)
+    -- Individual category pages replace the old nested scroll frames.
+    local content = CreateFrame("Frame", nil, configWindow)
+    content:SetPoint("TOPLEFT", 12, -52)
+    content:SetPoint("BOTTOMRIGHT", -12, 18)
 
     -- Dummy tab for UpdateModuleVisuals compatibility
     local dummyTab = CreateFrame("Frame")
@@ -51,8 +60,9 @@ function addonTable.Config.Initialize()
 
     -- Run panel setup
     if addonTable.ConfigSetup and addonTable.ConfigSetup.Tracker then
-        addonTable.ConfigSetup.Tracker(scrollChild, dummyTab, configWindow)
+        addonTable.ConfigSetup.Tracker(content, dummyTab, configWindow)
     end
+    addonTable.ConfigTheme.SkinTree(configWindow)
 
     -- Register with Blizzard Settings
     if Settings and Settings.RegisterCanvasLayoutCategory then
