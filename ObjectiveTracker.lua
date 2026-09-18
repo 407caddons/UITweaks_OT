@@ -92,12 +92,12 @@ end
 -- Toggle Button Factory (Yellow +/-)
 local function CreateToggleButton(parent)
     local btn = CreateFrame("Button", nil, parent)
-    btn:SetSize(30, 30)
+    btn:SetSize(22, 22)
     local text = btn:CreateFontString(nil, "OVERLAY")
-    text:SetFont("Fonts\\FRIZQT__.TTF", 25, "OUTLINE")
+    text:SetFont("Fonts\\FRIZQT__.TTF", 16, "")
     text:SetPoint("CENTER", 0, 0)
     text:SetShadowOffset(1, -1)
-    text:SetTextColor(1, 0.82, 0)
+    text:SetTextColor(.55, .9, .8)
     btn.Text = text
     return btn
 end
@@ -216,16 +216,27 @@ local function AcquireItem()
     local btn = CreateFrame("Button", nil, scrollChild)
     btn:SetHeight(20)
     btn:RegisterForClicks("LeftButtonUp", "RightButtonUp", "MiddleButtonUp")
+    btn:SetHighlightTexture("Interface\\Buttons\\WHITE8X8")
+    btn:GetHighlightTexture():SetVertexColor(.35, .9, .76, .06)
+    local sectionBackground = btn:CreateTexture(nil, "BACKGROUND")
+    sectionBackground:SetAllPoints()
+    sectionBackground:SetColorTexture(.08, .12, .14, .7)
+    sectionBackground:Hide()
+    btn.SectionBackground = sectionBackground
 
     local icon = btn:CreateTexture(nil, "ARTWORK")
     icon:SetSize(14, 14)
-    icon:SetPoint("LEFT", 0, 0)
+    icon:SetPoint("TOPLEFT", 0, -2)
     btn.Icon = icon
 
     local text = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    text:SetPoint("LEFT", icon, "RIGHT", 5, 0)
-    text:SetPoint("RIGHT", 0, 0)
+    text:SetPoint("TOPLEFT", 20, -2)
+    text:SetPoint("TOPRIGHT", -26, -2)
     text:SetJustifyH("LEFT")
+    text:SetJustifyV("TOP")
+    text:SetWordWrap(true)
+    text:SetShadowColor(0, 0, 0, .85)
+    text:SetShadowOffset(1, -1)
     btn.Text = text
 
     local toggleBtn = CreateToggleButton(btn)
@@ -266,12 +277,16 @@ local function ReleaseItems()
     local inCombat = InCombatLockdown()
     for _, btn in ipairs(itemPool) do
         btn.released = true
+        btn.objectiveIndex = nil
+        btn.questTitleColor = nil
         btn:Hide()
         btn:SetScript("OnClick", nil)
         btn:SetScript("OnEnter", nil)
         btn:SetScript("OnLeave", nil)
         btn.Icon:Hide()
         btn.Text:SetText("")
+        btn.Text:SetHeight(0)
+        btn.SectionBackground:Hide()
         if btn.ToggleBtn then btn.ToggleBtn:Hide() end
         if btn.ItemBtn and not inCombat then
             btn.ItemBtn:ClearAllPoints()
@@ -279,7 +294,10 @@ local function ReleaseItems()
             btn.ItemBtn:SetAttribute("type", nil)
             btn.ItemBtn:SetAttribute("item", nil)
         end
-        if btn.ProgressBar then btn.ProgressBar:Hide() end
+        if btn.ProgressBar then
+            btn.ProgressBar:Hide()
+            btn.ProgressBar:SetAlpha(1)
+        end
     end
     wipe(activeTimerBtns)
 end
@@ -402,9 +420,11 @@ local function BuildTimerBtn(displaySecs, color)
 
     local timerFont = ucState.questNameFont or "Fonts\\FRIZQT__.TTF"
     local timerSize = ucState.questNameSize or 14
-    btn.Text:SetFont(timerFont, timerSize, "OUTLINE")
+    btn.Text:SetFont(timerFont, timerSize, "")
     btn.Icon:Hide()
-    btn.Text:SetPoint("LEFT", 19, 0)
+    btn.Text:ClearAllPoints()
+    btn.Text:SetPoint("TOPLEFT", 20, -2)
+    btn.Text:SetPoint("TOPRIGHT", -26, -2)
     btn:EnableMouse(false)
     btn.ToggleBtn:Hide()
 
@@ -770,11 +790,13 @@ local function ScheduleUpdateContent()
     end)
 end
 
-local function AddLine(text, isHeader, questID, achieID, isObjective, overrideColor, perksActivityID)
+local function AddLine(text, isHeader, questID, achieID, isObjective, overrideColor, perksActivityID, isMetadata)
     local btn = AcquireItem()
     btn:Show()
 
     btn.questID = questID
+    btn.objectiveIndex = nil
+    btn.questTitleColor = nil
     btn.achieID = achieID
     btn.perksActivityID = perksActivityID
     btn.isSuperTrackedObjective = isObjective and questID and C_SuperTrack.GetSuperTrackedQuestID() == questID
@@ -785,14 +807,20 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
     local indent = ucState.indent or 0
     btn:SetWidth(ucState.width - indent)
     btn:SetPoint("TOPLEFT", indent, ucState.yOffset)
+    btn.Text:ClearAllPoints()
+    btn.Text:SetHeight(0)
+    btn.Text:SetPoint("TOPLEFT", 20, -2)
+    btn.Text:SetPoint("TOPRIGHT", -26, -2)
 
     if isHeader then
-        btn.Text:SetFont(ucState.sectionHeaderFont, ucState.sectionHeaderSize, "OUTLINE")
+        btn.Text:SetFont(ucState.sectionHeaderFont, ucState.sectionHeaderSize, "")
+        btn.SectionBackground:Show()
         btn.Text:SetText(text)
         local shc = ucState.sectionHeaderColor
         btn.Text:SetTextColor(shc.r, shc.g, shc.b, shc.a or 1)
         btn.Icon:Hide()
-        btn.Text:SetPoint("LEFT", 0, 0)
+        btn.Text:SetPoint("TOPLEFT", 8, -4)
+        btn.Text:SetPoint("TOPRIGHT", -26, -4)
 
         if questID then
             local section = questID
@@ -811,8 +839,8 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                 btn.ToggleBtn.Text:SetText("-")
             end
 
-            local textWidth = SafeTextMeasurement(btn.Text:GetStringWidth(), 0)
-            btn.ToggleBtn:SetPoint("LEFT", btn.Text, "LEFT", textWidth + 5, 0)
+            btn.ToggleBtn:ClearAllPoints()
+            btn.ToggleBtn:SetPoint("TOPRIGHT", btn, "TOPRIGHT", 0, 0)
         else
             btn.ToggleBtn:Hide()
         end
@@ -820,17 +848,18 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
         btn:EnableMouse(false)
         local sh = SafeTextMeasurement(btn.Text:GetStringHeight(), ucState.sectionHeaderSize)
         local sLineH = (sh and sh > 0) and sh or ucState.sectionHeaderSize
-        btn:SetHeight(sLineH + 4)
-        ucState.yOffset = ucState.yOffset - (sLineH + 6)
+        btn:SetHeight(sLineH + 10)
+        ucState.yOffset = ucState.yOffset - (sLineH + 16)
     else
         if isObjective then
-            local currentSize = ucState.detailSize
-            btn.Text:SetFont(ucState.detailFont, currentSize, "OUTLINE")
+            local currentSize = isMetadata and math.max(10, ucState.detailSize - 1) or ucState.detailSize
+            btn.Text:SetFont(ucState.detailFont, currentSize, "")
             btn.Text:SetText(text)
             local oc = ucState.objectiveColor
             btn.Text:SetTextColor(oc.r, oc.g, oc.b, oc.a or 1)
+            if isMetadata then btn.Text:SetTextColor(.65, .72, .75) end
             btn.Icon:Hide()
-            btn.Text:SetPoint("LEFT", 19, 0)
+            btn.Text:SetPoint("TOPLEFT", 20, -2)
             btn:EnableMouse(false)
 
             if btn.isSuperTrackedObjective then
@@ -843,12 +872,22 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
 
             local textHeight = SafeTextMeasurement(btn.Text:GetStringHeight(), currentSize)
             local lineHeight = math.max(textHeight, currentSize)
+            -- Reserve the measured space out of combat. Combat text changes
+            -- clip within this rectangle instead of overlapping adjacent rows.
+            btn.Text:SetHeight(lineHeight)
             btn:SetHeight(lineHeight + 2)
             ucState.yOffset = ucState.yOffset - (lineHeight + ucState.questPadding)
         else
             local currentSize = ucState.questNameSize
-            btn.Text:SetFont(ucState.questNameFont, currentSize, "OUTLINE")
+            btn.Text:SetFont(ucState.questNameFont, currentSize, "")
             btn.Text:SetText(text)
+
+            -- Cache the non-selected colour outside combat, not the selected
+            -- override, so an old highlight can be restored correctly.
+            if questID then
+                btn.questTitleColor = (not C_QuestLog.IsWorldQuest(questID)
+                    and GetCampaignColor(questID)) or ucState.questNameColor
+            end
 
             if overrideColor then
                 btn.Text:SetTextColor(overrideColor.r, overrideColor.g, overrideColor.b, overrideColor.a or 1)
@@ -876,8 +915,9 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                         btn.Icon:SetTexture("Interface\\GossipFrame\\AvailableQuestIcon")
                     end
                 end
+                btn.Icon:SetSize(14, 14)
                 btn.Icon:Show()
-                btn.Text:SetPoint("LEFT", btn.Icon, "RIGHT", 5, 0)
+                btn.Text:SetPoint("TOPLEFT", 20, -2)
                 btn:EnableMouse(true)
 
                 local questLogIndex = C_QuestLog.GetLogIndexForQuestID(questID)
@@ -887,10 +927,10 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                         btn.ItemBtn.iconTex:SetTexture(questItemIcon)
                         if not InCombatLockdown() then
                             local right = btn:GetRight()
-                            local cy = select(2, btn:GetCenter())
-                            if right and cy then
+                            local top = btn:GetTop()
+                            if right and top then
                                 btn.ItemBtn:ClearAllPoints()
-                                btn.ItemBtn:SetPoint("RIGHT", UIParent, "BOTTOMLEFT", right - 2, cy)
+                                btn.ItemBtn:SetPoint("TOPRIGHT", UIParent, "BOTTOMLEFT", right - 2, top)
                             end
                             btn.ItemBtn:SetAttribute("type", "item")
                             btn.ItemBtn:SetAttribute("item", questItemLink)
@@ -904,7 +944,7 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                 end
             else
                 btn.Icon:Hide()
-                btn.Text:SetPoint("LEFT", 19, 0)
+                btn.Text:SetPoint("TOPLEFT", 20, -2)
                 if achieID then btn:EnableMouse(true) else btn:EnableMouse(false) end
                 if btn.ItemBtn and not InCombatLockdown() then btn.ItemBtn:Hide() end
             end
@@ -1098,6 +1138,18 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
         end
     end
     return btn
+end
+
+-- Metadata stays separate from the title so long quest names wrap cleanly.
+local function AddQuestMetadata(questID, isWorldQuest)
+    local metadata = isWorldQuest and "" or GetQuestLineString(questID)
+    if isWorldQuest and addonTable.db.showWorldQuestTimer then
+        metadata = metadata .. GetTimeLeftString(questID)
+    end
+    metadata = metadata .. GetDistanceString(questID)
+    if metadata ~= "" then
+        AddLine(metadata:gsub("^%s+", ""), false, nil, nil, true, nil, nil, true)
+    end
 end
 
 -- ============================================================
@@ -1490,25 +1542,22 @@ local function RenderSingleWQ(questID, superTrackedQuestID)
         local title = C_QuestLog.GetTitleForQuestID(questID)
         if title then
             title = GetWQRewardIcon(questID) .. GetQuestTypePrefix(questID) .. title
-            if addonTable.db.showWorldQuestTimer then
-                title = title .. GetTimeLeftString(questID)
-            end
-            title = title .. GetDistanceString(questID)
             local color = nil
             if questID == superTrackedQuestID then
                 color = addonTable.db.activeQuestColor
             end
             AddLine(title, false, questID, nil, false, color)
+            AddQuestMetadata(questID, true)
             displayedIDs[questID] = true
             AddTimerLine(questID)
             local objectives = C_QuestLog.GetQuestObjectives(questID)
             if objectives then
-                for _, obj in pairs(objectives) do
+                for objectiveIndex, obj in ipairs(objectives) do
                     if not (obj.finished and addonTable.db.hideCompletedSubtasks) then
                         local objText = obj.text
                         if objText and objText ~= "" then
                             if obj.finished then objText = FormatCompletedObjective(objText) end
-                            AddLine(objText, false, questID, nil, true)
+                            AddLine(objText, false, questID, nil, true).objectiveIndex = objectiveIndex
                         end
                     end
                 end
@@ -1593,7 +1642,13 @@ local function RenderQuests()
     wipe(hiddenTaskQuests)
     for i = 1, numQuestLogEntries do
         local info = C_QuestLog.GetInfo(i)
-        if info and not info.isHeader and info.isHidden and info.isTask and info.isOnMap and info.questID then
+        -- Some accepted patrol tasks have no local map POI (isOnMap=false).
+        -- Keep the existing on-map path, and include accepted active tasks
+        -- without requiring a map marker or a manual quest watch.
+        if info and not info.isHeader and not info.isInternalOnly
+            and info.isHidden and info.isTask and info.questID
+            and (info.isOnMap or
+                (C_QuestLog.IsOnQuest(info.questID) and C_TaskQuest.IsActive(info.questID))) then
             if not displayedIDs[info.questID] and not C_QuestLog.IsWorldQuest(info.questID) then
                 table.insert(hiddenTaskQuests, info.questID)
             end
@@ -1609,12 +1664,12 @@ local function RenderQuests()
                     displayedIDs[questID] = true
                     local objectives = C_QuestLog.GetQuestObjectives(questID)
                     if objectives then
-                        for _, obj in pairs(objectives) do
+                        for objectiveIndex, obj in ipairs(objectives) do
                             if not (obj.finished and addonTable.db.hideCompletedSubtasks) then
                                 local objText = obj.text
                                 if objText and objText ~= "" then
                                     if obj.finished then objText = FormatCompletedObjective(objText) end
-                                    AddLine(objText, false, questID, nil, true)
+                                    AddLine(objText, false, questID, nil, true).objectiveIndex = objectiveIndex
                                 end
                             end
                         end
@@ -1664,8 +1719,7 @@ local function RenderQuests()
                 if extraIndent then ucState.indent = extraIndent end
                 local title = C_QuestLog.GetTitleForQuestID(questID)
                 if title then
-                    title = GetQuestTypePrefix(questID) ..
-                        title .. GetQuestLineString(questID) .. GetDistanceString(questID)
+                    title = GetQuestTypePrefix(questID) .. title
                     local color = nil
                     if questID == superTrackedQuestID then
                         color = addonTable.db.activeQuestColor
@@ -1673,16 +1727,17 @@ local function RenderQuests()
                         color = GetCampaignColor(questID)
                     end
                     AddLine(title, false, questID, nil, false, color)
+                    AddQuestMetadata(questID, false)
                     displayedIDs[questID] = true
                     AddTimerLine(questID)
                     local objectives = C_QuestLog.GetQuestObjectives(questID)
                     if objectives then
-                        for _, obj in pairs(objectives) do
+                        for objectiveIndex, obj in ipairs(objectives) do
                             if not (obj.finished and addonTable.db.hideCompletedSubtasks) then
                                 local objText = obj.text
                                 if objText and objText ~= "" then
                                     if obj.finished then objText = FormatCompletedObjective(objText) end
-                                    AddLine(objText, false, questID, nil, true)
+                                    AddLine(objText, false, questID, nil, true).objectiveIndex = objectiveIndex
                                 end
                             end
                         end
@@ -1723,11 +1778,13 @@ local function RenderQuests()
                 btn:SetScript("OnClick", nil)
                 btn:SetWidth(ucState.width)
                 btn:SetPoint("TOPLEFT", 0, ucState.yOffset)
-                btn.Text:SetFont(ucState.questNameFont, ucState.questNameSize, "OUTLINE")
+                btn.Text:SetFont(ucState.questNameFont, ucState.questNameSize, "")
                 btn.Text:SetText(label .. " (" .. #quests .. ")")
                 btn.Text:SetTextColor(colorR, colorG, colorB)
                 btn.Icon:Hide()
-                btn.Text:SetPoint("LEFT", 10, 0)
+                btn.Text:ClearAllPoints()
+                btn.Text:SetPoint("TOPLEFT", 8, -2)
+                btn.Text:SetPoint("TOPRIGHT", -26, -2)
                 btn:EnableMouse(false)
                 btn:SetScript("OnEnter", nil); btn:SetScript("OnLeave", nil)
                 if btn.ItemBtn and not InCombatLockdown() then btn.ItemBtn:Hide() end
@@ -1738,8 +1795,8 @@ local function RenderQuests()
                     UpdateContent()
                 end)
                 btn.ToggleBtn.Text:SetText(isCollapsed and "+" or "-")
-                local textWidth = SafeTextMeasurement(btn.Text:GetStringWidth(), 0)
-                btn.ToggleBtn:SetPoint("LEFT", btn.Text, "LEFT", textWidth + 5, 0)
+                btn.ToggleBtn:ClearAllPoints()
+                btn.ToggleBtn:SetPoint("TOPRIGHT", btn, "TOPRIGHT", 0, 0)
                 local gh = SafeTextMeasurement(btn.Text:GetStringHeight(), ucState.questNameSize)
                 local gLineH = (gh and gh > 0) and gh or ucState.questNameSize
                 btn:SetHeight(gLineH + 4)
@@ -2154,7 +2211,7 @@ local function RenderCampaignQuests()
         if extraIndent then ucState.indent = extraIndent end
         local title = C_QuestLog.GetTitleForQuestID(questID)
         if title then
-            title = GetQuestTypePrefix(questID) .. title .. GetQuestLineString(questID) .. GetDistanceString(questID)
+            title = GetQuestTypePrefix(questID) .. title
             local color
             if questID == superTrackedQuestID then
                 color = addonTable.db.activeQuestColor
@@ -2162,16 +2219,17 @@ local function RenderCampaignQuests()
                 color = addonTable.db.campaignQuestColor
             end
             AddLine(title, false, questID, nil, false, color)
+            AddQuestMetadata(questID, false)
             displayedIDs[questID] = true
             AddTimerLine(questID)
             local objectives = C_QuestLog.GetQuestObjectives(questID)
             if objectives then
-                for _, obj in pairs(objectives) do
+                for objectiveIndex, obj in ipairs(objectives) do
                     if not (obj.finished and addonTable.db.hideCompletedSubtasks) then
                         local objText = obj.text
                         if objText and objText ~= "" then
                             if obj.finished then objText = FormatCompletedObjective(objText) end
-                            AddLine(objText, false, questID, nil, true)
+                            AddLine(objText, false, questID, nil, true).objectiveIndex = objectiveIndex
                         end
                     end
                 end
@@ -2215,12 +2273,14 @@ local function RenderCampaignQuests()
                 btn:SetScript("OnClick", nil)
                 btn:SetWidth(ucState.width)
                 btn:SetPoint("TOPLEFT", 0, ucState.yOffset)
-                btn.Text:SetFont(ucState.questNameFont, ucState.questNameSize, "OUTLINE")
+                btn.Text:SetFont(ucState.questNameFont, ucState.questNameSize, "")
                 btn.Text:SetText(campaignName .. " (" .. #remaining .. ")")
                 local cqc = addonTable.db.campaignQuestColor or { r = 0.9, g = 0.7, b = 0.2 }
                 btn.Text:SetTextColor(cqc.r, cqc.g, cqc.b)
                 btn.Icon:Hide()
-                btn.Text:SetPoint("LEFT", 10, 0)
+                btn.Text:ClearAllPoints()
+                btn.Text:SetPoint("TOPLEFT", 8, -2)
+                btn.Text:SetPoint("TOPRIGHT", -26, -2)
                 btn:EnableMouse(false)
                 btn:SetScript("OnEnter", nil); btn:SetScript("OnLeave", nil)
                 if btn.ItemBtn and not InCombatLockdown() then btn.ItemBtn:Hide() end
@@ -2231,9 +2291,12 @@ local function RenderCampaignQuests()
                     UpdateContent()
                 end)
                 btn.ToggleBtn.Text:SetText(isCollapsed and "+" or "-")
-                local textWidth = SafeTextMeasurement(btn.Text:GetStringWidth(), 0)
-                btn.ToggleBtn:SetPoint("LEFT", btn.Text, "LEFT", textWidth + 5, 0)
-                ucState.yOffset = ucState.yOffset - (ucState.questNameSize + 4)
+                btn.ToggleBtn:ClearAllPoints()
+                btn.ToggleBtn:SetPoint("TOPRIGHT", btn, "TOPRIGHT", 0, 0)
+                local groupHeight = math.max(ucState.questNameSize,
+                    SafeTextMeasurement(btn.Text:GetStringHeight(), ucState.questNameSize))
+                btn:SetHeight(groupHeight + 6)
+                ucState.yOffset = ucState.yOffset - (groupHeight + 8)
                 if not isCollapsed then
                     for _, qID in ipairs(remaining) do RenderOneCampaignQuest(qID, 10) end
                 end
@@ -2256,12 +2319,55 @@ local sectionRenderers = {
     achievements = RenderAchievements,
 }
 
+-- Only updates addon-owned text and already-visible progress bars. No row
+-- acquisition, measurement, anchors, visibility or secure attributes here.
+local function RefreshCombatObjectives()
+    local cache = {}
+    local superTrackedQuestID = C_SuperTrack.GetSuperTrackedQuestID()
+    local canRefreshHighlight = Secret.CanAccessValue(superTrackedQuestID)
+    for _, row in ipairs(itemPool) do
+        if not row.released and canRefreshHighlight and row.questID then
+            local selected = row.questID == superTrackedQuestID
+            if row.questTitleColor then
+                local color = selected and addonTable.db.activeQuestColor or row.questTitleColor
+                row.Text:SetTextColor(color.r, color.g, color.b, color.a or 1)
+            end
+            if row.objectiveIndex then
+                row.isSuperTrackedObjective = selected
+                row.ProgressBar:SetAlpha(selected and 1 or 0)
+            end
+        end
+        if not row.released and row.objectiveIndex and row.questID then
+            local questID = row.questID
+            if cache[questID] == nil then
+                local ok, objectives = pcall(C_QuestLog.GetQuestObjectives, questID)
+                cache[questID] = ok and Secret.CanAccessValue(objectives)
+                    and type(objectives) == "table" and objectives or false
+            end
+            local objectives = cache[questID]
+            local objective = objectives and objectives[row.objectiveIndex]
+            if Secret.CanAccessValue(objective) and type(objective) == "table" then
+                local text, finished = objective.text, objective.finished
+                if Secret.CanAccessValue(text) and type(text) == "string" and text ~= ""
+                    and Secret.CanAccessValue(finished) and type(finished) == "boolean" then
+                    row.Text:SetText(finished and FormatCompletedObjective(text) or text)
+                    if row.isSuperTrackedObjective and row.ProgressBar:IsShown() then
+                        local progress, hasProgress = GetObjectiveProgress(text)
+                        if hasProgress then row.ProgressBar:SetValue(math.min(100, math.max(0, progress))) end
+                    end
+                end
+            end
+        end
+    end
+end
+
 UpdateContent = function()
     if not trackerFrame then return end
     if ApplyTrackerState() ~= "visible" then return end
-    -- Preserve rows and secure item attributes until combat ends. The regen
-    -- event rebuilds from current data; countdown text has its own ticker.
-    if InCombatLockdown() then return end
+    if InCombatLockdown() then
+        RefreshCombatObjectives()
+        return
+    end
 
     ReleaseItems()
 
