@@ -105,6 +105,16 @@ local function RegisterSlashCommands()
     -- Only register standalone slash if LunaUITweaks is NOT loaded
     -- (when integrated, use /luit instead)
     SLASH_LUNAOBJTRACKER1 = "/luitracker"
+    SLASH_LUNAOBJTRACKERNATIVE1 = "/lotnative"
+    SlashCmdList["LUNAOBJTRACKERNATIVE"] = function(message)
+        local mode = (message or ""):lower():match("^%s*(%S+)")
+        if mode == "on" or mode == "off" then
+            addonTable.db.debugNativeTracker = mode == "on"
+            print("Luna: native tracker diagnostic " .. mode .. ". Run /reload to apply.")
+        else
+            print("Luna: /lotnative on leaves Blizzard's tracker untouched after /reload; /lotnative off restores suppression after /reload.")
+        end
+    end
     SLASH_LUNAOBJTRACKER2 = "/lot"
     SlashCmdList["LUNAOBJTRACKER"] = function()
         addonTable.Config.ToggleWindow()

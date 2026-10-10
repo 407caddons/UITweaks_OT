@@ -1156,19 +1156,13 @@ end
 -- Blizzard tracker suppression
 -- ============================================================
 
--- Hide the native tracker as one top-level unit. Reparenting it to a hidden
--- frame also suppresses all descendant rendering and mouse input without ever
--- touching Blizzard's child frames or shared UI-widget pools. SetParent is
--- protected in combat, so alpha is used only as a temporary fallback and the
--- requested parent change is completed when lockdown ends.
-local nativeTrackerHiddenParent = CreateFrame("Frame", "LunaObjectiveTrackerHiddenParent", UIParent)
-nativeTrackerHiddenParent:Hide()
-
-local nativeTrackerOriginalParent
-local nativeTrackerReparented = false
+-- Hide the container through the secure visibility manager. Hidden ancestors
+-- suppress both rendering and descendant mouse input without changing pin,
+-- widget or tracker-child methods. Driver changes are deferred during combat.
+local nativeTrackerDriverFrames = setmetatable({}, { __mode = "k" })
+local nativeTrackerOriginalAlphas = setmetatable({}, { __mode = "k" })
 local nativeTrackerShouldBeHidden = false
 local ApplyNativeTrackerSuppression
-
 local nativeTrackerSuppressionFrame = CreateFrame("Frame")
 nativeTrackerSuppressionFrame:SetScript("OnEvent", function(self)
     self:UnregisterEvent("PLAYER_REGEN_ENABLED")
@@ -1177,37 +1171,51 @@ end)
 
 ApplyNativeTrackerSuppression = function(shouldHide)
     nativeTrackerShouldBeHidden = shouldHide and true or false
+    if addonTable.db and addonTable.db.debugNativeTracker then return end
     local frame = ObjectiveTrackerFrame
     if not frame then return end
-
+    -- Blizzard may Show() the container between visibility-driver ticks.
+    -- Keep it transparent through those intervals to prevent visible flashes.
+    if nativeTrackerShouldBeHidden then
+        if nativeTrackerOriginalAlphas[frame] == nil then
+            local alpha = frame:GetAlpha()
+            if not Secret.CanAccessValue(alpha) or type(alpha) ~= "number" then return end
+            nativeTrackerOriginalAlphas[frame] = alpha
+        end
+        frame:SetAlpha(0)
+    end
+    local registered = nativeTrackerDriverFrames[frame]
+    -- A hide requested during combat may be cancelled before registration.
+    if not nativeTrackerShouldBeHidden and not registered then
+        local originalAlpha = nativeTrackerOriginalAlphas[frame]
+        if originalAlpha ~= nil then
+            frame:SetAlpha(originalAlpha)
+            nativeTrackerOriginalAlphas[frame] = nil
+        end
+    end
+    if nativeTrackerShouldBeHidden == (registered == true) then
+        nativeTrackerSuppressionFrame:UnregisterEvent("PLAYER_REGEN_ENABLED")
+        return
+    end
     if InCombatLockdown() then
-        frame:SetAlpha(nativeTrackerShouldBeHidden and 0 or 1)
         nativeTrackerSuppressionFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
         return
     end
-
     nativeTrackerSuppressionFrame:UnregisterEvent("PLAYER_REGEN_ENABLED")
     if nativeTrackerShouldBeHidden then
-        if not nativeTrackerReparented then
-            nativeTrackerOriginalParent = frame:GetParent() or UIParent
-            nativeTrackerReparented = true
-        end
-        if frame:GetParent() ~= nativeTrackerHiddenParent then
-            frame:SetParent(nativeTrackerHiddenParent)
-        end
-        frame:SetAlpha(1)
-    else
-        if nativeTrackerReparented then
-            frame:SetParent(nativeTrackerOriginalParent or UIParent)
-            nativeTrackerReparented = false
-            nativeTrackerOriginalParent = nil
-        end
-        frame:SetAlpha(1)
+        RegisterStateDriver(frame, "visibility", "hide")
+        nativeTrackerDriverFrames[frame] = true
+    elseif registered then
+        local originalAlpha = nativeTrackerOriginalAlphas[frame]
+        if originalAlpha ~= nil then frame:SetAlpha(originalAlpha) end
+        nativeTrackerOriginalAlphas[frame] = nil
+        -- Resolve a secure show once to clear statehidden, then hand visibility
+        -- back to Blizzard. Avoid directly invoking its Show/layout from Lua.
+        RegisterStateDriver(frame, "visibility", "show")
+        UnregisterStateDriver(frame, "visibility")
+        nativeTrackerDriverFrames[frame] = nil
     end
 end
-
--- ============================================================
--- Tracker frame setup
 -- ============================================================
 local function SetupCustomTracker()
     if trackerFrame then return end
@@ -1432,9 +1440,6 @@ function addonTable.ObjectiveTracker.UpdateSettings()
         StopRuntime()
         ApplyTrackerState(true)
         UpdateQuestItemButton()
-        if ObjectiveTrackerFrame then
-            ObjectiveTrackerFrame:SetScale(1)
-        end
         return
     end
 
