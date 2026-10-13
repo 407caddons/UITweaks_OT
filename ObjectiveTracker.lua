@@ -12,6 +12,49 @@ end
 
 local Secret = addonTable.Secret
 
+-- Read-only local API facades: Blizzard's globals and pooled frames are never
+-- patched. Inaccessible snapshots are skipped, not coerced to "completed".
+local C_QuestLog = Secret.QueryAPI(C_QuestLog, { GetNumQuestWatches = 0, GetNumQuestLogEntries = 0 })
+-- Use the original query as input; this changes only the local facade.
+C_QuestLog.GetQuestObjectives = Secret.QueryRows(_G.C_QuestLog.GetQuestObjectives,
+    { "text", "finished", "numFulfilled", "numRequired", "type" })
+local C_TaskQuest = Secret.QueryAPI(C_TaskQuest)
+local C_Map = Secret.QueryAPI(C_Map)
+local C_SuperTrack = Secret.QueryAPI(C_SuperTrack)
+local C_ScenarioInfo = Secret.QueryAPI(C_ScenarioInfo)
+local C_Scenario = Secret.QueryAPI(C_Scenario)
+local C_UIWidgetManager = Secret.QueryAPI(C_UIWidgetManager)
+local C_CampaignInfo = Secret.QueryAPI(C_CampaignInfo)
+local C_QuestLine = Secret.QueryAPI(C_QuestLine)
+local C_PerksActivities = Secret.QueryAPI(C_PerksActivities)
+local C_ContentTracking = Secret.QueryAPI(C_ContentTracking, { GetTrackedIDs = {} })
+local C_ChallengeMode = Secret.QueryAPI(C_ChallengeMode)
+local QuestUtil = Secret.QueryAPI(QuestUtil)
+local IsInInstance = Secret.WrapQuery(IsInInstance, false)
+local GetAchievementInfo = Secret.WrapQuery(GetAchievementInfo)
+local GetAchievementNumCriteria = Secret.WrapQuery(GetAchievementNumCriteria, 0)
+local GetAchievementCriteriaInfo = Secret.WrapQuery(GetAchievementCriteriaInfo)
+local GetQuestLogSpecialItemInfo = Secret.WrapQuery(GetQuestLogSpecialItemInfo)
+local GetQuestLogIsAutoComplete = Secret.WrapQuery(GetQuestLogIsAutoComplete)
+local GetNumQuestLogRewards = Secret.WrapQuery(GetNumQuestLogRewards, 0)
+local GetQuestLogRewardMoney = Secret.WrapQuery(GetQuestLogRewardMoney, 0)
+local GetWorldElapsedTimers = Secret.WrapQuery(GetWorldElapsedTimers)
+local GetWorldElapsedTime = Secret.WrapQuery(GetWorldElapsedTime)
+
+local runtimeGeneration = 0
+local trackingGeneration = 0
+local pendingAutoTrack = {}
+local pendingRestoreTrack = false
+local pendingCampaignTrack = nil
+
+local function RuntimeAfter(delay, func)
+    local generation = runtimeGeneration
+    SafeAfter(delay, function()
+        if generation ~= runtimeGeneration or not addonTable.db or not addonTable.db.enabled then return end
+        func()
+    end)
+end
+
 -- Check accessibility before comparisons/arithmetic: a secret number is still
 -- truthy, so `measurement or fallback` does not make it safe.
 local function SafeTextMeasurement(value, fallback)
@@ -31,6 +74,7 @@ local headerFrame
 local SetupTrackerEvents
 local UpdateContent
 local SyncTrackerEvents
+local ReplayPendingTracking
 local autoTrackFrame
 local distanceTicker
 local timerTicker
@@ -42,7 +86,6 @@ local currentTrackerState
 local trackerStatePendingCombatApply = false
 local pendingSettingsUpdate = false
 local pendingMoveStop = false
-local scenarioTimerEndTime = nil -- set by WORLD_STATE_TIMER_START; used for scenario countdown
 
 -- Helper: check if we are in a raid instance
 local function IsInRaidInstance()
@@ -113,6 +156,10 @@ local function OnQuestClick(self, button)
         return
     end
 
+    -- Chat links are harmless; opening Blizzard panels, changing watches and
+    -- sharing/completing quests are deliberately kept out of combat.
+    if InCombatLockdown() then return end
+
     if button == "LeftButton" and IsControlKeyDown() and self.questID and type(self.questID) == "number" and addonTable.db.shiftClickUntrack then
         C_QuestLog.RemoveQuestWatch(self.questID)
         SafeAfter(0.1, addonTable.ObjectiveTracker.UpdateContent)
@@ -156,7 +203,7 @@ local function OnQuestClick(self, button)
         end
     end
 
-    if not InCombatLockdown() and self.questID and type(self.questID) == "number" and addonTable.db.clickOpenQuest then
+    if button == "LeftButton" and not InCombatLockdown() and self.questID and type(self.questID) == "number" and addonTable.db.clickOpenQuest then
         if QuestMapFrame_OpenToQuestDetails then
             -- Opens the world map + quest log and focuses the quest (no
             -- separate ToggleQuestLog needed — OpenToQuestDetails calls
@@ -171,6 +218,7 @@ local function OnQuestClick(self, button)
 end
 
 local function OnAchieveClick(self, button)
+    if InCombatLockdown() then return end
     if InCombatLockdown() and button == "LeftButton" then return end
 
     if IsShiftKeyDown() and self.achieID and addonTable.db.shiftClickUntrack then
@@ -194,6 +242,7 @@ local function OnAchieveClick(self, button)
 end
 
 local function OnPerksActivityClick(self, button)
+    if InCombatLockdown() then return end
     if IsShiftKeyDown() and self.perksActivityID and addonTable.db.shiftClickUntrack then
         if C_PerksActivities and C_PerksActivities.RemoveTrackedPerksActivity then
             C_PerksActivities.RemoveTrackedPerksActivity(self.perksActivityID)
@@ -273,12 +322,37 @@ local function AcquireItem()
     return btn
 end
 
+-- Secure buttons live outside the scroll child. Synchronise their screen
+-- positions only out of combat, and hide buttons for clipped rows entirely.
+local function SyncQuestItemControls()
+    if InCombatLockdown() or not scrollFrame then return end
+    local viewportTop = SafeTextMeasurement(scrollFrame:GetTop(), nil)
+    local viewportBottom = SafeTextMeasurement(scrollFrame:GetBottom(), nil)
+    for _, row in ipairs(itemPool) do
+        local button = row.ItemBtn
+        if button then
+            local top = SafeTextMeasurement(row:GetTop(), nil)
+            local right = SafeTextMeasurement(row:GetRight(), nil)
+            if not row.released and row.itemLink and row:IsShown() and top and right
+                and viewportTop and viewportBottom and top <= viewportTop and top - 20 >= viewportBottom then
+                button:ClearAllPoints()
+                button:SetPoint("TOPRIGHT", UIParent, "BOTTOMLEFT", right - 2, top)
+                button:Show()
+            else
+                button:Hide()
+            end
+        end
+    end
+end
+
 local function ReleaseItems()
     local inCombat = InCombatLockdown()
     for _, btn in ipairs(itemPool) do
         btn.released = true
         btn.objectiveIndex = nil
         btn.questTitleColor = nil
+        btn.combatRefresh = nil
+        btn.itemLink = nil
         btn:Hide()
         btn:SetScript("OnClick", nil)
         btn:SetScript("OnEnter", nil)
@@ -311,7 +385,7 @@ local SECTION_SPACING = 10
 local ITEM_SPACING = 5
 
 local function GetObjectiveProgress(objectiveText)
-    if not objectiveText then return 0, false end
+    if not Secret.CanAccessValue(objectiveText) or type(objectiveText) ~= "string" then return 0, false end
     local percentMatch = objectiveText:match("(%d+)%%")
     if percentMatch then return tonumber(percentMatch), true end
     local current, total = objectiveText:match("(%d+)/(%d+)")
@@ -464,7 +538,7 @@ local useMetric = not (GetLocale() == "enUS" or GetLocale() == "enGB")
 local function GetDistanceString(questID)
     if not addonTable.db.showQuestDistance then return "" end
     local distSq = C_QuestLog.GetDistanceSqToQuest(questID)
-    if not distSq then return "" end
+    if not distSq or distSq < 0 then return "" end
     local dist = math.sqrt(distSq)
     local unit = "yds"
     if useMetric then
@@ -587,6 +661,7 @@ end
 
 local function CheckQuestSounds(questID, playQuestSound, playObjSound)
     local isComplete = C_QuestLog.IsComplete(questID)
+    if type(isComplete) ~= "boolean" then return end
     local wasComplete = prevQuestComplete[questID]
     local channel = addonTable.db.soundChannel or "Master"
 
@@ -597,8 +672,13 @@ local function CheckQuestSounds(questID, playQuestSound, playObjSound)
     if isComplete and wasComplete == false
         and addonTable.db.autoTrackQuests
         and C_CampaignInfo and C_CampaignInfo.IsCampaignQuest and C_CampaignInfo.IsCampaignQuest(questID) then
-        SafeAfter(1.5, function()
-            if InCombatLockdown() then return end
+        local generation = trackingGeneration
+        RuntimeAfter(1.5, function()
+            if generation ~= trackingGeneration or not addonTable.db.autoTrackQuests then return end
+            if InCombatLockdown() then
+                pendingCampaignTrack = { questID = questID, generation = generation }
+                return
+            end
             local stNow = C_SuperTrack.GetSuperTrackedQuestID()
             if stNow and stNow ~= 0
                 and stNow ~= questID
@@ -623,10 +703,12 @@ local function CheckQuestSounds(questID, playQuestSound, playObjSound)
             end
             for j, obj in ipairs(objectives) do
                 local prev = prevObjectiveState[questID][j]
-                if prev and not prev.finished and obj.finished then
+                if type(obj.finished) == "boolean" and prev and prev.finished == false and obj.finished then
                     PlaySound(addonTable.db.objectiveCompletionSoundID or 6197, channel)
                 end
-                prevObjectiveState[questID][j] = { finished = obj.finished }
+                if type(obj.finished) == "boolean" then
+                    prevObjectiveState[questID][j] = { finished = obj.finished }
+                end
             end
         end
     end
@@ -675,6 +757,7 @@ local function CheckCompletionSounds()
 end
 
 local function HandleSuperTrackChanged()
+    trackingGeneration = trackingGeneration + 1
     if not addonTable.db.restoreSuperTrack then
         savedSuperTrackedQuestID = nil
         lastKnownSuperTrackedQuestID = C_SuperTrack.GetSuperTrackedQuestID()
@@ -682,6 +765,7 @@ local function HandleSuperTrackChanged()
     end
 
     local currentST = C_SuperTrack.GetSuperTrackedQuestID()
+    if currentST == nil then return end
     local isCurrentWQ = currentST and currentST ~= 0 and
         (C_QuestLog.IsWorldQuest(currentST) or (C_QuestLog.IsQuestTask(currentST) and not C_QuestLog.GetQuestWatchType(currentST)))
 
@@ -694,6 +778,7 @@ local function HandleSuperTrackChanged()
     end
 
     if (not currentST or currentST == 0) and savedSuperTrackedQuestID then
+        if InCombatLockdown() then pendingRestoreTrack = true; return end
         if C_QuestLog.IsOnQuest(savedSuperTrackedQuestID) and C_QuestLog.GetQuestWatchType(savedSuperTrackedQuestID) then
             C_SuperTrack.SetSuperTrackedQuestID(savedSuperTrackedQuestID)
             savedSuperTrackedQuestID = nil
@@ -711,12 +796,17 @@ local function CheckRestoreSuperTrack()
         return
     end
     -- Defer 0.3s so C_TaskQuest.IsActive reflects the new zone position.
-    SafeAfter(0.3, function()
+    trackingGeneration = trackingGeneration + 1
+    local generation = trackingGeneration
+    RuntimeAfter(0.3, function()
+        if generation ~= trackingGeneration then return end
         if not addonTable.db.restoreSuperTrack then
             proximityTrackedWQ = nil
             return
         end
+        if InCombatLockdown() then pendingRestoreTrack = true; return end
         local currentST = C_SuperTrack.GetSuperTrackedQuestID()
+        if currentST == nil then return end
 
         -- If we manually set a WQ for proximity, the ticker handles restoration.
         if proximityTrackedWQ then return end
@@ -797,6 +887,8 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
     btn.questID = questID
     btn.objectiveIndex = nil
     btn.questTitleColor = nil
+    btn.combatRefresh = nil
+    btn.itemLink = nil
     btn.achieID = achieID
     btn.perksActivityID = perksActivityID
     btn.isSuperTrackedObjective = isObjective and questID and C_SuperTrack.GetSuperTrackedQuestID() == questID
@@ -924,6 +1016,7 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                 if questLogIndex then
                     local questItemLink, questItemIcon = GetQuestLogSpecialItemInfo(questLogIndex)
                     if questItemLink and questItemIcon then
+                        btn.itemLink = questItemLink
                         btn.ItemBtn.iconTex:SetTexture(questItemIcon)
                         if not InCombatLockdown() then
                             local right = btn:GetRight()
@@ -1148,7 +1241,15 @@ local function AddQuestMetadata(questID, isWorldQuest)
     end
     metadata = metadata .. GetDistanceString(questID)
     if metadata ~= "" then
-        AddLine(metadata:gsub("^%s+", ""), false, nil, nil, true, nil, nil, true)
+        local row = AddLine(metadata:gsub("^%s+", ""), false, nil, nil, true, nil, nil, true)
+        row.combatRefresh = function()
+            if addonTable.db.showQuestDistance and C_QuestLog.GetDistanceSqToQuest(questID) == nil then return end
+            if isWorldQuest and addonTable.db.showWorldQuestTimer
+                and C_TaskQuest.GetQuestTimeLeftMinutes(questID) == nil then return end
+            local current = isWorldQuest and "" or GetQuestLineString(questID)
+            if isWorldQuest and addonTable.db.showWorldQuestTimer then current = current .. GetTimeLeftString(questID) end
+            return (current .. GetDistanceString(questID)):gsub("^%s+", "")
+        end
     end
 end
 
@@ -1170,13 +1271,20 @@ nativeTrackerSuppressionFrame:SetScript("OnEvent", function(self)
 end)
 
 ApplyNativeTrackerSuppression = function(shouldHide)
+    local changed = nativeTrackerShouldBeHidden ~= (shouldHide and true or false)
     nativeTrackerShouldBeHidden = shouldHide and true or false
     if addonTable.db and addonTable.db.debugNativeTracker then return end
     local frame = ObjectiveTrackerFrame
     if not frame then return end
     -- Blizzard may Show() the container between visibility-driver ticks.
     -- Keep it transparent through those intervals to prevent visible flashes.
-    if nativeTrackerShouldBeHidden then
+    if nativeTrackerShouldBeHidden and (changed or nativeTrackerOriginalAlphas[frame] == nil) then
+        -- Do not repeatedly write Blizzard-owned state from combat progress
+        -- events. Initial suppression and driver changes wait for regen.
+        if InCombatLockdown() then
+            nativeTrackerSuppressionFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+            return
+        end
         if nativeTrackerOriginalAlphas[frame] == nil then
             local alpha = frame:GetAlpha()
             if not Secret.CanAccessValue(alpha) or type(alpha) ~= "number" then return end
@@ -1289,6 +1397,7 @@ local function SetupCustomTracker()
     scrollChild = CreateFrame("Frame", nil, scrollFrame)
     scrollChild:SetSize(settings.width - 40, 500)
     scrollFrame:SetScrollChild(scrollChild)
+    scrollFrame:HookScript("OnVerticalScroll", SyncQuestItemControls)
 
     -- Resize handle
     local resizeHandle = CreateFrame("Frame", nil, trackerBody)
@@ -1311,6 +1420,11 @@ local function SetupCustomTracker()
 end
 
 local function StopRuntime()
+    runtimeGeneration = runtimeGeneration + 1
+    trackingGeneration = trackingGeneration + 1
+    wipe(pendingAutoTrack)
+    pendingRestoreTrack = false
+    pendingCampaignTrack = nil
     if distanceTicker then
         distanceTicker:Cancel()
         distanceTicker = nil
@@ -1361,7 +1475,7 @@ local function SyncContentTickers(state)
     local interval = addonTable.db.distanceUpdateInterval or 0
     if interval > 0 then
         distanceTicker = C_Timer.NewTicker(interval, function()
-            if EvaluateTrackerState() == "visible" and not InCombatLockdown() then
+            if EvaluateTrackerState() == "visible" then
                 UpdateContent()
             end
         end)
@@ -1434,6 +1548,8 @@ function addonTable.ObjectiveTracker.UpdateSettings()
         return
     end
     pendingSettingsUpdate = false
+    runtimeGeneration = runtimeGeneration + 1
+    trackingGeneration = trackingGeneration + 1
     local enabled = addonTable.db.enabled
 
     if not enabled then
@@ -1540,6 +1656,8 @@ settingsReplayFrame:SetScript("OnEvent", function()
         addonTable.ObjectiveTracker.UpdateSettings()
         if UpdateContent then UpdateContent() end
     end
+    if ReplayPendingTracking then ReplayPendingTracking() end
+    SyncQuestItemControls()
 end)
 
 local function RenderSingleWQ(questID, superTrackedQuestID)
@@ -1929,21 +2047,26 @@ local function RenderScenarios()
         and stepInfo.weightedProgress > 0 then
         local pct = math.floor(stepInfo.weightedProgress)
         local color = pct >= 100 and "00FF00" or "FFFF00"
-        AddLine(string.format("|cFF%s%d%% Complete|r", color, pct), false, nil, nil, true)
+        local row = AddLine(string.format("|cFF%s%d%% Complete|r", color, pct), false, nil, nil, true)
+        local stage = scenarioInfo.currentStage
+        row.combatRefresh = function(cache)
+            cache.scenario = cache.scenario or C_ScenarioInfo.GetScenarioInfo() or false
+            cache.step = cache.step or C_ScenarioInfo.GetScenarioStepInfo() or false
+            local scenario, step = cache.scenario, cache.step
+            if not scenario or scenario.name ~= scenarioInfo.name or scenario.currentStage ~= stage
+                or not step or type(step.weightedProgress) ~= "number" then return end
+            local progress = math.floor(step.weightedProgress)
+            return string.format("|cFF%s%d%% Complete|r", progress >= 100 and "00FF00" or "FFFF00", progress)
+        end
     end
     local numCriteria = stepInfo and stepInfo.numCriteria or 0
     local seenCriteriaIDs = {}
-    local function RenderCriteriaInfo(criteriaInfo)
-        local cid = criteriaInfo.criteriaID or criteriaInfo.description
-        if cid and seenCriteriaIDs[cid] then return false end
-        if cid then seenCriteriaIDs[cid] = true end
+    local function CriteriaText(criteriaInfo)
         local text = criteriaInfo.description or ""
-        if text == "" then return true end
+        if text == "" then return nil end
         if criteriaInfo.isWeightedProgress then
-            if criteriaInfo.quantity then text = text .. " " .. criteriaInfo.quantity .. "%" end
-        elseif criteriaInfo.quantity and criteriaInfo.totalQuantity
-            and Secret.CanAccessValue(criteriaInfo.quantity)
-            and Secret.CanAccessValue(criteriaInfo.totalQuantity)
+            if type(criteriaInfo.quantity) == "number" then text = text .. " " .. criteriaInfo.quantity .. "%" end
+        elseif type(criteriaInfo.quantity) == "number" and type(criteriaInfo.totalQuantity) == "number"
             and criteriaInfo.totalQuantity > 1 then
             text = text .. " (" .. criteriaInfo.quantity .. "/" .. criteriaInfo.totalQuantity .. ")"
         end
@@ -1953,21 +2076,37 @@ local function RenderScenarios()
             text = FormatCompletedObjective(text)
         end
         if criteriaInfo.isWeightedProgress then text = "|cFF00FFFF[Bonus]|r " .. text end
-        AddLine(text, false, nil, nil, true)
+        return text
+    end
+    local function RenderCriteriaInfo(criteriaInfo, index)
+        local cid = criteriaInfo.criteriaID or criteriaInfo.description
+        if cid and seenCriteriaIDs[cid] then return false end
+        if cid then seenCriteriaIDs[cid] = true end
+        local text = CriteriaText(criteriaInfo)
+        if not text then return true end
+        local row = AddLine(text, false, nil, nil, true)
+        local stage = scenarioInfo.currentStage
+        row.combatRefresh = function(cache)
+            cache.scenario = cache.scenario or C_ScenarioInfo.GetScenarioInfo() or false
+            local scenario = cache.scenario
+            if not scenario or scenario.name ~= scenarioInfo.name or scenario.currentStage ~= stage then return end
+            local current = C_ScenarioInfo.GetCriteriaInfo(index)
+            if current and (current.criteriaID or current.description) == cid then return CriteriaText(current) end
+        end
         return true
     end
     if numCriteria > 0 then
         for i = 1, numCriteria do
             local criteriaInfo = C_ScenarioInfo.GetCriteriaInfo(i)
             if not criteriaInfo then break end
-            RenderCriteriaInfo(criteriaInfo)
+            RenderCriteriaInfo(criteriaInfo, i)
         end
     elseif C_ScenarioInfo.GetCriteriaInfo then
         local criteriaIndex = 1
         while criteriaIndex <= 50 do
             local criteriaInfo = C_ScenarioInfo.GetCriteriaInfo(criteriaIndex)
             if not criteriaInfo then break end
-            RenderCriteriaInfo(criteriaInfo)
+            RenderCriteriaInfo(criteriaInfo, criteriaIndex)
             criteriaIndex = criteriaIndex + 1
         end
     end
@@ -2018,21 +2157,26 @@ local function RenderScenarios()
                 end
             end
         end
-        -- Method 4: WORLD_STATE_TIMER_START cached end time (countdown)
-        if not placed and scenarioTimerEndTime then
-            local remaining = scenarioTimerEndTime - GetTime()
-            if remaining > 0 and remaining <= 3600 then
-                PlaceTimerLine("scenario", remaining)
-                placed = true
-            end
-        end
-        -- Method 5: world elapsed timer (fallback: count up when no total duration known)
-        if not placed and GetWorldElapsedTimers then
-            local numTimers = GetWorldElapsedTimers()
-            if type(numTimers) == "number" and Secret.CanAccessValue(numTimers) and numTimers > 0 then
-                local _, elap = GetWorldElapsedTimer(1)
-                if type(elap) == "number" and Secret.CanAccessValue(elap) and elap >= 0 then
-                    PlaceElapsedLine("scenario", elap)
+        -- WORLD_STATE_TIMER_START supplies a timer ID, not a duration.
+        -- GetWorldElapsedTimers returns IDs as varargs, not a count.
+        if not placed and GetWorldElapsedTimers and GetWorldElapsedTime then
+            local timerID = GetWorldElapsedTimers()
+            if type(timerID) == "number" then
+                local _, elapsed, timerType = GetWorldElapsedTime(timerID)
+                if type(elapsed) == "number" and elapsed >= 0 then
+                    local duration
+                    local types = Enum.WorldElapsedTimerTypes
+                    if types and timerType == types.ChallengeMode then
+                        local mapID = C_ChallengeMode.GetActiveChallengeMapID()
+                        if mapID then _, _, duration = C_ChallengeMode.GetMapUIInfo(mapID) end
+                    elseif types and timerType == types.ProvingGround and C_Scenario and C_Scenario.GetProvingGroundsInfo then
+                        _, _, _, duration = C_Scenario.GetProvingGroundsInfo()
+                    end
+                    if type(duration) == "number" and duration > 0 then
+                        PlaceTimerLine("scenario", math.max(0, duration - elapsed))
+                    else
+                        PlaceElapsedLine("scenario", elapsed)
+                    end
                 end
             end
         end
@@ -2078,7 +2222,16 @@ local function RenderAchievements()
                                 text = text .. " (" .. quantity .. "/" .. reqQuantity .. ")"
                             end
                             if completed then text = "|cFF00FF00" .. text .. "|r" end
-                            AddLine(text, false, nil, nil, true)
+                            local row = AddLine(text, false, nil, nil, true)
+                            local index = j
+                            row.combatRefresh = function()
+                                local description, _, done, amount, total = GetAchievementCriteriaInfo(achID, index)
+                                if type(description) ~= "string" or type(done) ~= "boolean" then return end
+                                if type(amount) == "number" and type(total) == "number" and total > 1 then
+                                    description = description .. " (" .. amount .. "/" .. total .. ")"
+                                end
+                                return done and "|cFF00FF00" .. description .. "|r" or description
+                            end
                         end
                     end
                 end
@@ -2159,12 +2312,29 @@ local function RenderTravelersLog()
             else
                 AddLine(activity.activityName or "Unknown Activity", false, nil, nil, false, nil, activityID)
                 if activity.requirementsList and #activity.requirementsList > 0 then
-                    for _, req in ipairs(activity.requirementsList) do
+                    for requirementIndex, req in ipairs(activity.requirementsList) do
                         if req and req.requirementText and req.requirementText ~= "" then
                             if not (req.completed and addonTable.db.hideCompletedSubtasks) then
                                 local objText = req.requirementText
                                 if req.completed then objText = FormatCompletedObjective(objText) end
-                                AddLine(objText, false, nil, nil, true, nil, activityID)
+                                local row = AddLine(objText, false, nil, nil, true, nil, activityID)
+                                local index = requirementIndex
+                                row.combatRefresh = function(cache)
+                                    cache.perks = cache.perks or C_PerksActivities.GetPerksActivitiesInfo() or false
+                                    local info = cache.perks
+                                    if not info or not info.activities then return end
+                                    for _, current in ipairs(info.activities) do
+                                        if current.ID == activityID then
+                                            local requirement = current.requirementsList and current.requirementsList[index]
+                                            if requirement and type(requirement.requirementText) == "string"
+                                                and type(requirement.completed) == "boolean" then
+                                                return requirement.completed and FormatCompletedObjective(requirement.requirementText)
+                                                    or requirement.requirementText
+                                            end
+                                            return
+                                        end
+                                    end
+                                end
                             end
                         end
                     end
@@ -2324,12 +2494,12 @@ local sectionRenderers = {
     achievements = RenderAchievements,
 }
 
--- Only updates addon-owned text and already-visible progress bars. No row
--- acquisition, measurement, anchors, visibility or secure attributes here.
+-- Only updates addon-owned text and unprotected progress bars. No row
+-- acquisition, layout or secure item attributes are changed in combat.
 local function RefreshCombatObjectives()
     local cache = {}
     local superTrackedQuestID = C_SuperTrack.GetSuperTrackedQuestID()
-    local canRefreshHighlight = Secret.CanAccessValue(superTrackedQuestID)
+    local canRefreshHighlight = type(superTrackedQuestID) == "number"
     for _, row in ipairs(itemPool) do
         if not row.released and canRefreshHighlight and row.questID then
             local selected = row.questID == superTrackedQuestID
@@ -2356,12 +2526,24 @@ local function RefreshCombatObjectives()
                 if Secret.CanAccessValue(text) and type(text) == "string" and text ~= ""
                     and Secret.CanAccessValue(finished) and type(finished) == "boolean" then
                     row.Text:SetText(finished and FormatCompletedObjective(text) or text)
-                    if row.isSuperTrackedObjective and row.ProgressBar:IsShown() then
-                        local progress, hasProgress = GetObjectiveProgress(text)
-                        if hasProgress then row.ProgressBar:SetValue(math.min(100, math.max(0, progress))) end
+                    local progress, hasProgress = GetObjectiveProgress(text)
+                    if type(objective.numFulfilled) == "number" and type(objective.numRequired) == "number"
+                        and objective.numRequired > 0 then
+                        progress = objective.numFulfilled / objective.numRequired * 100
+                        hasProgress = true
+                    end
+                    if row.isSuperTrackedObjective and hasProgress and not finished then
+                        row.ProgressBar:SetValue(math.min(100, math.max(0, progress)))
+                        if not row.ProgressBar:IsProtected() then row.ProgressBar:Show() end
+                    elseif not row.ProgressBar:IsProtected() then
+                        row.ProgressBar:Hide()
                     end
                 end
             end
+        end
+        if not row.released and row.combatRefresh then
+            local ok, text = pcall(row.combatRefresh, cache)
+            if ok and Secret.CanAccessValue(text) and type(text) == "string" then row.Text:SetText(text) end
         end
     end
 end
@@ -2473,7 +2655,8 @@ UpdateContent = function()
 
     -- If we proximity-tracked a WQ and it's no longer in the display, restore the
     -- saved campaign quest. validWQs is repopulated by RenderWorldQuests each frame.
-    if proximityTrackedWQ and cachedMapID and not validWQs[proximityTrackedWQ] then
+    if proximityTrackedWQ and cachedMapID and not validWQs[proximityTrackedWQ]
+        and C_TaskQuest.IsActive(proximityTrackedWQ) == false then
         local currentST = C_SuperTrack.GetSuperTrackedQuestID()
         if currentST == proximityTrackedWQ then
             if savedSuperTrackedQuestID
@@ -2492,6 +2675,7 @@ UpdateContent = function()
 
     local totalHeight = math.abs(ucState.yOffset)
     scrollChild:SetHeight(math.max(totalHeight, 50))
+    SyncQuestItemControls()
     UpdateQuestItemButton()
 end
 
@@ -2507,19 +2691,48 @@ function LunaUITweaks_ToggleTracker()
 end
 
 -- Auto-track new quests
-autoTrackFrame = CreateFrame("Frame")
-autoTrackFrame:SetScript("OnEvent", function(self, event, questID)
-    if event == "QUEST_ACCEPTED" and questID then
-        if addonTable.db and addonTable.db.enabled and addonTable.db.autoTrackQuests then
-            if not C_QuestLog.GetQuestWatchType(questID) then
-                C_QuestLog.AddQuestWatch(questID, Enum.QuestWatchType.Automatic)
-                if (C_SuperTrack.GetSuperTrackedQuestID() or 0) == 0 then
-                    C_SuperTrack.SetSuperTrackedQuestID(questID)
-                end
-                SafeAfter(0.2, UpdateContent)
-            end
+local function AutoTrackQuest(questID)
+    if not addonTable.db or not addonTable.db.enabled or not addonTable.db.autoTrackQuests then return end
+    if not Secret.CanAccessValue(questID) or type(questID) ~= "number" or questID <= 0 then return end
+    if InCombatLockdown() then pendingAutoTrack[questID] = true; return end
+    if C_QuestLog.IsOnQuest(questID) ~= true then return end
+    if not C_QuestLog.GetQuestWatchType(questID) then
+        C_QuestLog.AddQuestWatch(questID, Enum.QuestWatchType.Automatic)
+        if C_SuperTrack.GetSuperTrackedQuestID() == 0 then C_SuperTrack.SetSuperTrackedQuestID(questID) end
+        RuntimeAfter(0.2, UpdateContent)
+    end
+end
+
+ReplayPendingTracking = function()
+    if InCombatLockdown() then return end
+    local queued = pendingAutoTrack
+    pendingAutoTrack = {}
+    if not addonTable.db or not addonTable.db.enabled then
+        pendingRestoreTrack = false
+        pendingCampaignTrack = nil
+        return
+    end
+    local campaign = pendingCampaignTrack
+    pendingCampaignTrack = nil
+    if campaign and campaign.generation == trackingGeneration and addonTable.db.autoTrackQuests
+        and C_QuestLog.IsComplete(campaign.questID) == true then
+        local current = C_SuperTrack.GetSuperTrackedQuestID()
+        -- Never override a selection made while this request was deferred.
+        if current == campaign.questID or current == 0 then
+            local nearest = FindNearestTrackedCampaignQuest()
+            if nearest then C_SuperTrack.SetSuperTrackedQuestID(nearest) end
         end
     end
+    for questID in pairs(queued) do AutoTrackQuest(questID) end
+    if pendingRestoreTrack then
+        pendingRestoreTrack = false
+        CheckRestoreSuperTrack()
+    end
+end
+
+autoTrackFrame = CreateFrame("Frame")
+autoTrackFrame:SetScript("OnEvent", function(self, event, questID)
+    if event == "QUEST_ACCEPTED" then AutoTrackQuest(questID) end
 end)
 
 -- ============================================================
@@ -2539,9 +2752,14 @@ local VISIBILITY_EVENTS = {
 local CONTENT_EVENTS = {
     "QUEST_WATCH_LIST_CHANGED",
     "TRACKED_ACHIEVEMENT_LIST_CHANGED",
+    "TRACKED_ACHIEVEMENT_UPDATE",
+    "ACHIEVEMENT_EARNED",
     "CONTENT_TRACKING_UPDATE",
     "CONTENT_TRACKING_LIST_UPDATE",
     "QUEST_LOG_UPDATE",
+    "QUEST_POI_UPDATE",
+    "QUEST_AUTOCOMPLETE",
+    "QUEST_TURNED_IN",
     "SUPER_TRACKING_CHANGED",
     "TASK_PROGRESS_UPDATE",
     "QUEST_ACCEPTED",
@@ -2581,6 +2799,7 @@ SetupTrackerEvents = function()
                 pendingQuestItemUpdate = nil
                 UpdateQuestItemButton()
             end
+            ReplayPendingTracking()
             UpdateContent()
         elseif event == "CHALLENGE_MODE_START"
             or event == "CHALLENGE_MODE_COMPLETED"
@@ -2609,15 +2828,13 @@ SetupTrackerEvents = function()
             end
             ScheduleUpdateContent()
         elseif event == "WORLD_STATE_TIMER_START" then
-            local timerType, timeRemaining, totalTime = ...
-            if type(timeRemaining) == "number" and Secret.CanAccessValue(timeRemaining) and timeRemaining > 0 then
-                scenarioTimerEndTime = GetTime() + timeRemaining
-            end
+            ScheduleUpdateContent()
         elseif event == "WORLD_STATE_TIMER_STOP" then
-            scenarioTimerEndTime = nil
+            ScheduleUpdateContent()
         elseif event == "QUEST_REMOVED" then
             local questID = ...
-            if questID then
+            if Secret.CanAccessValue(questID) and type(questID) == "number" then
+                pendingAutoTrack[questID] = nil
                 prevObjectiveState[questID] = nil
                 prevQuestComplete[questID] = nil
                 if savedSuperTrackedQuestID == questID then
@@ -2628,12 +2845,14 @@ SetupTrackerEvents = function()
                     -- WQ auto-removed on area exit — restore the saved campaign quest.
                     local currentST = C_SuperTrack.GetSuperTrackedQuestID()
                     if currentST == questID then
-                        if savedSuperTrackedQuestID
+                        if InCombatLockdown() then
+                            pendingRestoreTrack = true
+                        elseif savedSuperTrackedQuestID
                             and C_QuestLog.IsOnQuest(savedSuperTrackedQuestID)
                             and C_QuestLog.GetQuestWatchType(savedSuperTrackedQuestID) then
                             C_SuperTrack.SetSuperTrackedQuestID(savedSuperTrackedQuestID)
                         end
-                        savedSuperTrackedQuestID = nil
+                        if not InCombatLockdown() then savedSuperTrackedQuestID = nil end
                     end
                 end
             end

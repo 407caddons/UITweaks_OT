@@ -28,7 +28,13 @@ _G["BINDING_NAME_LUNAUITWEAKS_TOGGLE_TRACKER"] = "Toggle Objective Tracker"
 function addonTable.Core.SafeAfter(delay, func)
     if not func then return end
     if C_Timer and C_Timer.After then
-        pcall(C_Timer.After, delay, func)
+        C_Timer.After(delay, function()
+            local ok, err = pcall(func)
+            if not ok then
+                local message = addonTable.Secret.CanAccessValue(err) and tostring(err) or "inaccessible error value"
+                print("|cffff0000LunaUITweaks error:|r " .. message)
+            end
+        end)
     end
 end
 
