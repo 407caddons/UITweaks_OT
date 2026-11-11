@@ -1,0 +1,73 @@
+local addon, setCombat = ...
+local reports, calls = {}, {}
+local queue = addon.Deferred.New(function(err) reports[#reports + 1] = err end)
+setCombat(true)
+queue.Put("selection", function() calls[#calls + 1] = "stale" end)
+queue.Put("selection", function() calls[#calls + 1] = "latest" end)
+queue.Put("cancelled", function() error("cancelled job ran") end)
+queue.Cancel("cancelled")
+queue.Put("invalid", function() error("invalid job ran") end, function() return false end)
+queue.Flush()
+assert(#calls == 0)
+setCombat(false)
+queue.Flush()
+assert(#calls == 1 and calls[1] == "latest" and #reports == 0)
+queue.Put("error", function() error("test failure") end)
+queue.Put("after-error", function() calls[#calls + 1] = "after-error" end)
+queue.Flush()
+assert(#reports == 1 and calls[2] == "after-error", "one failed job must not wedge the queue")
+for i = 1, 7 do
+    local index = i
+    queue.Put("batch" .. index, function() calls[#calls + 1] = index end)
+end
+queue.Flush()
+assert(#calls == 6, "one batch must execute at most four jobs")
+queue.Flush()
+assert(#calls == 9)
+queue.Put("enters-combat", function() setCombat(true) end)
+queue.Put("after-combat", function() calls[#calls + 1] = "after-combat" end)
+queue.Flush()
+assert(#calls == 9, "draining must stop when combat resumes")
+setCombat(false)
+queue.Flush()
+assert(calls[10] == "after-combat")
+queue.Put("clear", function() queue.Clear() end)
+queue.Put("discard", function() error("cleared job ran") end)
+queue.Flush()
+queue.Flush()
+assert(#reports == 1)
+queue.Put("new-generation", function() calls[#calls + 1] = "new" end)
+queue.Flush()
+assert(calls[11] == "new")
+print("PASS: shared queue coalescing, cancellation, bounded batches, errors and resumed combat")
+
+local reads, rows = 0, { { type = "monster", text = "1/5 Enemies", finished = false, numFulfilled = 1, numRequired = 5 } }
+local model = addon.QuestModel.New(function() reads = reads + 1; return rows end)
+model.BeginPass()
+local first = model.GetObjectives(12)
+local objective = first[1]
+local record = model.GetRecord(12)
+assert(model.GetObjectives(12) == first and reads == 1)
+rows = { { type = "monster", text = "3/5 Enemies", finished = false, numFulfilled = 3, numRequired = 5 } }
+model.BeginPass()
+assert(model.GetObjectives(12) == first and first[1] == objective)
+assert(objective.text == "3/5 Enemies" and record.revision == 2)
+rows = { { text = "4/5 Enemies" } } -- inaccessible fields were omitted at the read boundary
+model.BeginPass()
+model.GetObjectives(12)
+assert(objective.text == "4/5 Enemies" and objective.finished == false)
+assert(not objective.freshCounters, "old counters must not override fresh readable progress text")
+rows = nil
+model.BeginPass()
+assert(model.GetObjectives(12) == first and objective.text == "4/5 Enemies")
+rows = {}
+model.BeginPass()
+assert(#model.GetObjectives(12) == 0, "readable empty list must remove old objectives")
+model.Forget(12)
+assert(model.GetRecord(12) == nil)
+rows = { { text = "New quest", finished = false } }
+model.BeginPass()
+assert(model.GetObjectives(12) ~= first)
+model.Clear()
+assert(model.GetRecord(12) == nil)
+print("PASS: persistent objective identity, per-pass reads, last-readable values and cache invalidation")

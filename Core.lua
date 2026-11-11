@@ -3,7 +3,8 @@ local addonName, addonTable = ...
 -- OptionalDeps makes an enabled Ellesmere tracker load before this addon.
 -- Stand down before registering events, bindings, or configuration panels;
 -- do not change the saved enabled preference or touch Blizzard's tracker.
-addonTable.disabledByEllesmere = C_AddOns.IsAddOnLoaded("EllesmereUIQuestTracker")
+local IsAddOnLoaded = (C_AddOns and C_AddOns.IsAddOnLoaded) or _G.IsAddOnLoaded
+addonTable.disabledByEllesmere = IsAddOnLoaded and IsAddOnLoaded("EllesmereUIQuestTracker") or false
 if addonTable.disabledByEllesmere then
     -- A previously saved toggle binding may still invoke this global.
     function LunaUITweaks_ToggleTracker() end
@@ -97,7 +98,8 @@ local DEFAULTS = {
     showWorldQuestTimer = true,
     showQuestCountdown = true,
     hideCompletedSubtasks = false,
-    groupQuestsByZone = false,
+    groupQuestsByZone = true,
+    zoneFilter = "all",
     groupQuestsByCampaign = false,
     worldQuestSortBy = "time",
     showQuestDistance = true,
@@ -110,6 +112,9 @@ local DEFAULTS = {
     highlightCampaignQuests = true,
     campaignQuestColor = { r = 0.9, g = 0.7, b = 0.2, a = 1 },
     showQuestTypeIndicators = true,
+    showQuestLevel = true,
+    showQuestReputation = true,
+    showUntrackedQuests = false,
     showQuestLineProgress = true,
     questCompletionSound = true,
     questCompletionSoundID = 6199,

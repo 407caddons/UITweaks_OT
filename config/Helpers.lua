@@ -29,11 +29,18 @@ end
 
 -- If LunaUITweaks is loaded, use its helpers instead of this minimal set.
 if LunaUITweaksAPI and LunaUITweaksAPI.Helpers then
-    addonTable.ConfigHelpers = LunaUITweaksAPI.Helpers
+    -- Copy the table so our safe font selector never replaces a base-addon
+    -- helper or falls back to its shared legacy dropdown implementation.
+    addonTable.ConfigHelpers = {}
+    for key, value in pairs(LunaUITweaksAPI.Helpers) do addonTable.ConfigHelpers[key] = value end
     -- Main addon's helpers may pre-date this function; inject if missing so
     -- TrackerPanel.lua can call it unconditionally.
     if not addonTable.ConfigHelpers.SetCheckButtonLabel then
         addonTable.ConfigHelpers.SetCheckButtonLabel = SetCheckButtonLabel
+    end
+    addonTable.ConfigHelpers.CreateFontDropdown = function(parent, name, label, current, onSelect, x, y)
+        return addonTable.ConfigDropdown.CreateFont(parent, name, label, current, onSelect, x, y,
+            addonTable.ConfigHelpers.fonts)
     end
     return
 end
@@ -206,62 +213,8 @@ end
 
 Helpers.fonts = BuildFontList()
 
-local fontObjectCache = {}
-
 --- Helper: Create Font Dropdown with visual font preview
 function Helpers.CreateFontDropdown(parent, name, labelText, currentFontPath, onSelectFunc, xOffset, yOffset)
-    xOffset = xOffset or 20
-
-    local label = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    label:SetPoint("TOPLEFT", xOffset, yOffset)
-    label:SetText(labelText)
-
-    local dropdown = CreateFrame("Frame", name, parent, "UIDropDownMenuTemplate")
-    dropdown:SetPoint("TOPLEFT", label, "BOTTOMLEFT", -15, -10)
-
-    local function OnClick(self)
-        UIDropDownMenu_SetSelectedID(dropdown, self:GetID())
-        if onSelectFunc then
-            onSelectFunc(self.value, self.fontName)
-        end
-    end
-
-    local function Initialize(self, level)
-        for i, fontData in ipairs(Helpers.fonts) do
-            local info = UIDropDownMenu_CreateInfo()
-            info.text = fontData.name
-            info.value = fontData.path
-            info.fontName = fontData.name
-            info.func = OnClick
-
-            local fontObj = fontObjectCache[fontData.path]
-            if not fontObj then
-                fontObj = CreateFont("LunaOTFontPreview_" .. i)
-                local ok = pcall(fontObj.SetFont, fontObj, fontData.path, 12, "")
-                if ok then
-                    fontObjectCache[fontData.path] = fontObj
-                else
-                    fontObj = nil
-                end
-            end
-            if fontObj then
-                info.fontObject = fontObj
-            end
-
-            UIDropDownMenu_AddButton(info, level)
-        end
-    end
-
-    UIDropDownMenu_Initialize(dropdown, Initialize)
-
-    local selectedName = "Select Font"
-    for _, f in ipairs(Helpers.fonts) do
-        if f.path == currentFontPath then
-            selectedName = f.name
-            break
-        end
-    end
-    UIDropDownMenu_SetText(dropdown, selectedName)
-
-    return dropdown
+    return addonTable.ConfigDropdown.CreateFont(parent, name, labelText, currentFontPath,
+        onSelectFunc, xOffset, yOffset, Helpers.fonts)
 end

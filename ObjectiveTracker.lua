@@ -11,6 +11,7 @@ local SafeAfter = addonTable.Core and addonTable.Core.SafeAfter or function(dela
 end
 
 local Secret = addonTable.Secret
+local Filter = addonTable.QuestFilter
 
 -- Read-only local API facades: Blizzard's globals and pooled frames are never
 -- patched. Inaccessible snapshots are skipped, not coerced to "completed".
@@ -18,6 +19,12 @@ local C_QuestLog = Secret.QueryAPI(C_QuestLog, { GetNumQuestWatches = 0, GetNumQ
 -- Use the original query as input; this changes only the local facade.
 C_QuestLog.GetQuestObjectives = Secret.QueryRows(_G.C_QuestLog.GetQuestObjectives,
     { "text", "finished", "numFulfilled", "numRequired", "type" })
+local questModel = addonTable.QuestModel.New(C_QuestLog.GetQuestObjectives)
+C_QuestLog.GetQuestObjectives = questModel.GetObjectives
+local deferred = addonTable.Deferred.New(function(err)
+    local message = Secret.CanAccessValue(err) and tostring(err) or "inaccessible error value"
+    print("|cffff0000Luna deferred work:|r " .. message)
+end)
 local C_TaskQuest = Secret.QueryAPI(C_TaskQuest)
 local C_Map = Secret.QueryAPI(C_Map)
 local C_SuperTrack = Secret.QueryAPI(C_SuperTrack)
@@ -46,6 +53,13 @@ local trackingGeneration = 0
 local pendingAutoTrack = {}
 local pendingRestoreTrack = false
 local pendingCampaignTrack = nil
+local ReplayPendingTracking
+
+local function QueueTrackingReplay()
+    deferred.Put("tracking", function()
+        if ReplayPendingTracking then ReplayPendingTracking() end
+    end, function() return addonTable.db and addonTable.db.enabled == true end)
+end
 
 local function RuntimeAfter(delay, func)
     local generation = runtimeGeneration
@@ -74,7 +88,6 @@ local headerFrame
 local SetupTrackerEvents
 local UpdateContent
 local SyncTrackerEvents
-local ReplayPendingTracking
 local autoTrackFrame
 local distanceTicker
 local timerTicker
@@ -84,8 +97,6 @@ local trackerContentKnown = false
 local trackerContentEmpty = false
 local currentTrackerState
 local trackerStatePendingCombatApply = false
-local pendingSettingsUpdate = false
-local pendingMoveStop = false
 
 -- Helper: check if we are in a raid instance
 local function IsInRaidInstance()
@@ -105,12 +116,12 @@ local questItemButton = CreateFrame("Button", "LunaQuestItemButton", UIParent, "
 questItemButton:Hide()
 questItemButton:RegisterForClicks("AnyUp", "AnyDown")
 
-local pendingQuestItemUpdate = false
 local function UpdateQuestItemButton()
     if InCombatLockdown() then
-        pendingQuestItemUpdate = true
+        deferred.Put("quest-item-binding", UpdateQuestItemButton)
         return
     end
+    deferred.Cancel("quest-item-binding")
     if not addonTable.db or not addonTable.db.enabled then
         questItemButton:SetAttribute("type", nil)
         questItemButton:SetAttribute("item", nil)
@@ -222,7 +233,7 @@ local function OnAchieveClick(self, button)
     if InCombatLockdown() and button == "LeftButton" then return end
 
     if IsShiftKeyDown() and self.achieID and addonTable.db.shiftClickUntrack then
-        if C_ContentTracking and C_ContentTracking.StopTracking then
+        if C_ContentTracking and C_ContentTracking.StopTracking and Enum.ContentTrackingType then
             C_ContentTracking.StopTracking(Enum.ContentTrackingType.Achievement, self.achieID,
                 Enum.ContentTrackingStopType.Manual)
         else
@@ -253,6 +264,53 @@ local function OnPerksActivityClick(self, button)
 end
 
 local itemPool = {}
+local questItemButtons = {}
+
+local function ReserveQuestItemButtons(count)
+    if InCombatLockdown() or not questItemContainer then return end
+    for _ = #questItemButtons + 1, count do
+        local button = CreateFrame("Button", nil, questItemContainer, "SecureActionButtonTemplate")
+        button:SetSize(20, 20)
+        button:Hide()
+        button:RegisterForClicks("AnyUp", "AnyDown")
+        button.iconTex = button:CreateTexture(nil, "ARTWORK")
+        button.iconTex:SetAllPoints()
+        button:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+        questItemButtons[#questItemButtons + 1] = button
+    end
+end
+
+local function ReleaseQuestItemButtons()
+    if InCombatLockdown() then return end
+    for _, button in ipairs(questItemButtons) do
+        button:Hide()
+        button:ClearAllPoints()
+        button:SetAttribute("type", nil)
+        button:SetAttribute("item", nil)
+        if button.row then button.row.ItemBtn = nil end
+        button.row = nil
+    end
+end
+
+local function AssignQuestItemButton(row, link, icon)
+    if InCombatLockdown() then return end
+    local button
+    for _, candidate in ipairs(questItemButtons) do
+        if not candidate.row then button = candidate; break end
+    end
+    if not button then
+        local index = #questItemButtons + 1
+        ReserveQuestItemButtons(#questItemButtons + 8)
+        button = questItemButtons[index]
+    end
+    if not button then return end
+    button.row, row.ItemBtn, row.itemLink = row, button, link
+    button:SetFrameLevel(row:GetFrameLevel() + 2)
+    button.iconTex:SetTexture(icon)
+    button:SetAttribute("type", "item")
+    button:SetAttribute("item", link)
+    -- SyncQuestItemControls decides whether this row is inside the viewport.
+end
 
 local function AcquireItem()
     for _, btn in ipairs(itemPool) do
@@ -293,16 +351,6 @@ local function AcquireItem()
     toggleBtn:Hide()
     btn.ToggleBtn = toggleBtn
 
-    local itemBtn = CreateFrame("Button", nil, questItemContainer, "SecureActionButtonTemplate")
-    itemBtn:SetSize(20, 20)
-    itemBtn:Hide()
-    itemBtn:RegisterForClicks("AnyUp", "AnyDown")
-    itemBtn:SetFrameLevel(btn:GetFrameLevel() + 2)
-    itemBtn.iconTex = itemBtn:CreateTexture(nil, "ARTWORK")
-    itemBtn.iconTex:SetAllPoints()
-    itemBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
-    btn.ItemBtn = itemBtn
-
     local progressBar = CreateFrame("StatusBar", nil, btn)
     progressBar:SetSize(0, 3)
     progressBar:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", 19, -2)
@@ -325,7 +373,12 @@ end
 -- Secure buttons live outside the scroll child. Synchronise their screen
 -- positions only out of combat, and hide buttons for clipped rows entirely.
 local function SyncQuestItemControls()
-    if InCombatLockdown() or not scrollFrame then return end
+    if InCombatLockdown() then
+        deferred.Put("quest-item-position", SyncQuestItemControls)
+        return
+    end
+    deferred.Cancel("quest-item-position")
+    if not scrollFrame then return end
     local viewportTop = SafeTextMeasurement(scrollFrame:GetTop(), nil)
     local viewportBottom = SafeTextMeasurement(scrollFrame:GetBottom(), nil)
     for _, row in ipairs(itemPool) do
@@ -347,11 +400,13 @@ end
 
 local function ReleaseItems()
     local inCombat = InCombatLockdown()
+    if not inCombat then ReleaseQuestItemButtons() end
     for _, btn in ipairs(itemPool) do
         btn.released = true
         btn.objectiveIndex = nil
         btn.questTitleColor = nil
         btn.combatRefresh = nil
+        btn.lastLiveText = nil
         btn.itemLink = nil
         btn:Hide()
         btn:SetScript("OnClick", nil)
@@ -362,12 +417,6 @@ local function ReleaseItems()
         btn.Text:SetHeight(0)
         btn.SectionBackground:Hide()
         if btn.ToggleBtn then btn.ToggleBtn:Hide() end
-        if btn.ItemBtn and not inCombat then
-            btn.ItemBtn:ClearAllPoints()
-            btn.ItemBtn:Hide()
-            btn.ItemBtn:SetAttribute("type", nil)
-            btn.ItemBtn:SetAttribute("item", nil)
-        end
         if btn.ProgressBar then
             btn.ProgressBar:Hide()
             btn.ProgressBar:SetAlpha(1)
@@ -417,7 +466,7 @@ local function GetQuestTypePrefix(questID)
     local logIndex = C_QuestLog.GetLogIndexForQuestID(questID)
     if logIndex then
         local info = C_QuestLog.GetInfo(logIndex)
-        if info and info.frequency then
+        if info and info.frequency and Enum.QuestFrequency then
             if info.frequency == Enum.QuestFrequency.Daily then return "|cFF00CCFF[D]|r " end
             if info.frequency == Enum.QuestFrequency.Weekly then return "|cFFCC00FF[W]|r " end
         end
@@ -426,6 +475,23 @@ local function GetQuestTypePrefix(questID)
         return "|cFF00CCFF[R]|r "
     end
     return ""
+end
+
+local function GetQuestLevelSuffix(questID)
+    if not addonTable.db.showQuestLevel then return "" end
+    local logIndex = C_QuestLog.GetLogIndexForQuestID(questID)
+    local info = logIndex and C_QuestLog.GetInfo(logIndex)
+    local level = info and info.level
+    if type(level) ~= "number" or not Secret.CanAccessValue(level) or level <= 0 then return "" end
+    local color = GetQuestDifficultyColor and GetQuestDifficultyColor(level)
+    local hex = color and string.format("%02x%02x%02x", (color.r or 1) * 255, (color.g or 1) * 255, (color.b or 1) * 255)
+        or "aaaaaa"
+    return string.format(" |cFF%s[%d]|r", hex, level)
+end
+
+local trackerQuests, untrackedQuests = {}, {}
+local function GetUntrackedSuffix(questID)
+    return untrackedQuests[questID] and " |cFF777777(not tracked)|r" or ""
 end
 
 local function GetWQRewardIcon(questID)
@@ -630,9 +696,36 @@ local function sortByTimeLeft(a, b)
     return timeA < timeB
 end
 
+-- Quests the tracker lists this pass: watched quests first, then (optionally)
+-- every other quest in the log. Indices into this list replace watch indices.
+local function BuildTrackerQuestList()
+    wipe(trackerQuests); wipe(untrackedQuests)
+    local seen = {}
+    for i = 1, C_QuestLog.GetNumQuestWatches() do
+        local questID = C_QuestLog.GetQuestIDForQuestWatchIndex(i)
+        if questID and not seen[questID] then
+            seen[questID] = true
+            trackerQuests[#trackerQuests + 1] = questID
+        end
+    end
+    if addonTable.db.showUntrackedQuests then
+        for i = 1, C_QuestLog.GetNumQuestLogEntries() do
+            local info = C_QuestLog.GetInfo(i)
+            local questID = info and info.questID
+            if type(questID) == "number" and Secret.CanAccessValue(questID) and not seen[questID]
+                and not info.isHeader and not info.isHidden and not info.isTask
+                and not C_QuestLog.IsWorldQuest(questID) then
+                seen[questID] = true
+                trackerQuests[#trackerQuests + 1] = questID
+                untrackedQuests[questID] = true
+            end
+        end
+    end
+end
+
 local function sortWatchIndexByDistance(a, b)
-    local qA = C_QuestLog.GetQuestIDForQuestWatchIndex(a)
-    local qB = C_QuestLog.GetQuestIDForQuestWatchIndex(b)
+    local qA = trackerQuests[a]
+    local qB = trackerQuests[b]
     local distA = qA and C_QuestLog.GetDistanceSqToQuest(qA) or 99999999
     local distB = qB and C_QuestLog.GetDistanceSqToQuest(qB) or 99999999
     return distA < distB
@@ -677,6 +770,7 @@ local function CheckQuestSounds(questID, playQuestSound, playObjSound)
             if generation ~= trackingGeneration or not addonTable.db.autoTrackQuests then return end
             if InCombatLockdown() then
                 pendingCampaignTrack = { questID = questID, generation = generation }
+                QueueTrackingReplay()
                 return
             end
             local stNow = C_SuperTrack.GetSuperTrackedQuestID()
@@ -716,6 +810,7 @@ end
 
 local function CheckCompletionSounds()
     if not addonTable.db.enabled then return end
+    questModel.BeginPass()
     local playQuestSound = addonTable.db.questCompletionSound
     local playObjSound = addonTable.db.objectiveCompletionSound
     local doAutoTrack = addonTable.db.autoTrackQuests
@@ -778,7 +873,7 @@ local function HandleSuperTrackChanged()
     end
 
     if (not currentST or currentST == 0) and savedSuperTrackedQuestID then
-        if InCombatLockdown() then pendingRestoreTrack = true; return end
+        if InCombatLockdown() then pendingRestoreTrack = true; QueueTrackingReplay(); return end
         if C_QuestLog.IsOnQuest(savedSuperTrackedQuestID) and C_QuestLog.GetQuestWatchType(savedSuperTrackedQuestID) then
             C_SuperTrack.SetSuperTrackedQuestID(savedSuperTrackedQuestID)
             savedSuperTrackedQuestID = nil
@@ -804,7 +899,7 @@ local function CheckRestoreSuperTrack()
             proximityTrackedWQ = nil
             return
         end
-        if InCombatLockdown() then pendingRestoreTrack = true; return end
+        if InCombatLockdown() then pendingRestoreTrack = true; QueueTrackingReplay(); return end
         local currentST = C_SuperTrack.GetSuperTrackedQuestID()
         if currentST == nil then return end
 
@@ -883,6 +978,7 @@ end
 local function AddLine(text, isHeader, questID, achieID, isObjective, overrideColor, perksActivityID, isMetadata)
     local btn = AcquireItem()
     btn:Show()
+    btn.lastLiveText = text
 
     btn.questID = questID
     btn.objectiveIndex = nil
@@ -1016,24 +1112,8 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
                 if questLogIndex then
                     local questItemLink, questItemIcon = GetQuestLogSpecialItemInfo(questLogIndex)
                     if questItemLink and questItemIcon then
-                        btn.itemLink = questItemLink
-                        btn.ItemBtn.iconTex:SetTexture(questItemIcon)
-                        if not InCombatLockdown() then
-                            local right = btn:GetRight()
-                            local top = btn:GetTop()
-                            if right and top then
-                                btn.ItemBtn:ClearAllPoints()
-                                btn.ItemBtn:SetPoint("TOPRIGHT", UIParent, "BOTTOMLEFT", right - 2, top)
-                            end
-                            btn.ItemBtn:SetAttribute("type", "item")
-                            btn.ItemBtn:SetAttribute("item", questItemLink)
-                            btn.ItemBtn:Show()
-                        end
-                    else
-                        if not InCombatLockdown() then btn.ItemBtn:Hide() end
+                        AssignQuestItemButton(btn, questItemLink, questItemIcon)
                     end
-                else
-                    if not InCombatLockdown() then btn.ItemBtn:Hide() end
                 end
             else
                 btn.Icon:Hide()
@@ -1233,6 +1313,74 @@ local function AddLine(text, isHeader, questID, achieID, isObjective, overrideCo
     return btn
 end
 
+-- ============================================================
+-- Reputation rewards
+-- ============================================================
+-- Measured on Forever (interface 16001): GetNumQuestLogRewardFactions() and
+-- GetQuestLogRewardFactionInfo(i) read the quest selected in the quest log (their
+-- extra arguments are ignored) and return factionID, rewardValue, where
+-- rewardValue is 100x the amount the quest window shows (10000 -> +100).
+local REP_VALUE_DIVISOR = 100
+local REP_MAX_ENTRIES = 8
+local REP_RECHECK_EMPTY = 300
+local repCache = {}
+
+local function GetFactionNameByID(factionID)
+    if C_Reputation and C_Reputation.GetFactionDataByID then
+        local ok, data = pcall(C_Reputation.GetFactionDataByID, factionID)
+        if ok and type(data) == "table" and Secret.CanAccessValue(data.name) and type(data.name) == "string" then
+            return data.name
+        end
+    end
+    if GetFactionInfoByID then
+        local ok, name = pcall(GetFactionInfoByID, factionID)
+        if ok and Secret.CanAccessValue(name) and type(name) == "string" then return name end
+    end
+    return "Faction " .. factionID
+end
+
+-- Selects the quest briefly (the API reads the selected quest), so this only
+-- runs out of combat; results are cached because rewards never change.
+local function ReadQuestReputations(questID)
+    local logIndex = C_QuestLog.GetLogIndexForQuestID(questID)
+    if not logIndex or logIndex == 0 then return nil end
+    local previous = C_QuestLog.GetSelectedQuest and C_QuestLog.GetSelectedQuest()
+    local switched = previous ~= questID
+    if switched then C_QuestLog.SetSelectedQuest(questID) end
+    local parts = {}
+    local ok = pcall(function()
+        local num = GetNumQuestLogRewardFactions()
+        if type(num) ~= "number" or not Secret.CanAccessValue(num) then return end
+        for i = 1, math.min(num, REP_MAX_ENTRIES) do
+            local factionID, value = GetQuestLogRewardFactionInfo(i)
+            if type(factionID) == "number" and type(value) == "number"
+                and Secret.CanAccessValue(factionID) and Secret.CanAccessValue(value)
+                and factionID > 0 and value ~= 0 then
+                local amount = math.floor(value / REP_VALUE_DIVISOR + 0.5)
+                local color = amount < 0 and "FFFF6666" or "FF66CC66"
+                parts[#parts + 1] = string.format("|c%s%+d|r %s", color, amount, GetFactionNameByID(factionID))
+            end
+        end
+    end)
+    if switched and previous and previous ~= 0 then C_QuestLog.SetSelectedQuest(previous) end
+    if not ok then return nil end
+    return table.concat(parts, ", ")
+end
+
+local function GetQuestRepString(questID)
+    if not addonTable.db.showQuestReputation then return "" end
+    if not (GetNumQuestLogRewardFactions and GetQuestLogRewardFactionInfo and C_QuestLog.SetSelectedQuest) then
+        return ""
+    end
+    local entry = repCache[questID]
+    if entry and (entry.text ~= "" or GetTime() - entry.time < REP_RECHECK_EMPTY) then return entry.text end
+    if InCombatLockdown() then return entry and entry.text or "" end
+    local text = ReadQuestReputations(questID)
+    if text == nil then return "" end
+    repCache[questID] = { text = text, time = GetTime() }
+    return text
+end
+
 -- Metadata stays separate from the title so long quest names wrap cleanly.
 local function AddQuestMetadata(questID, isWorldQuest)
     local metadata = isWorldQuest and "" or GetQuestLineString(questID)
@@ -1251,6 +1399,122 @@ local function AddQuestMetadata(questID, isWorldQuest)
             return (current .. GetDistanceString(questID)):gsub("^%s+", "")
         end
     end
+    if not isWorldQuest then
+        local rep = GetQuestRepString(questID)
+        if rep ~= "" then
+            local repRow = AddLine("Rep: " .. rep, false, nil, nil, true, nil, nil, true)
+            repRow.combatRefresh = function()
+                local current = GetQuestRepString(questID)
+                if current ~= "" then return "Rep: " .. current end
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- Search and zone filtering
+-- ============================================================
+-- A quest is listed when its zone passes the zone chip and its zone, title or
+-- objective text contains every search term. Results are cached per pass.
+local zoneNameCache, filterResultCache = {}, {}
+local zoneChipCounts = {}
+local filterBarData = { all = 0, here = 0, hereName = "", zones = {} }
+
+local function GetQuestZoneName(questID)
+    local cached = zoneNameCache[questID]
+    if cached then return cached end
+    local zoneName = "Other"
+    local headerIndex = C_QuestLog.GetHeaderIndexForQuest(questID)
+    if headerIndex then
+        local headerInfo = C_QuestLog.GetInfo(headerIndex)
+        if headerInfo and type(headerInfo.title) == "string" and Secret.CanAccessValue(headerInfo.title) then
+            zoneName = headerInfo.title
+        end
+    end
+    zoneNameCache[questID] = zoneName
+    return zoneName
+end
+
+local function MatchesSearch(questID, zoneName)
+    if not Filter.IsSearching() then return true end
+    local parts = { zoneName, C_QuestLog.GetTitleForQuestID(questID) }
+    local objectives = C_QuestLog.GetQuestObjectives(questID)
+    if objectives then
+        for _, obj in ipairs(objectives) do
+            if obj.text and obj.text ~= "" then parts[#parts + 1] = obj.text end
+        end
+    end
+    return Filter.Matches(parts)
+end
+
+local function QuestPassesFilter(questID)
+    if not Filter.IsActive() then return true end
+    local cached = filterResultCache[questID]
+    if cached ~= nil then return cached end
+    local zoneName = GetQuestZoneName(questID)
+    local pass = Filter.ZoneMatches(zoneName, ucState.hereNames) and MatchesSearch(questID, zoneName) or false
+    if pass and Filter.GetZoneMode() == "done" and not C_QuestLog.IsComplete(questID) then pass = false end
+    filterResultCache[questID] = pass
+    return pass
+end
+
+-- World/task quests belong to the zone the player is standing in.
+local function WorldQuestPassesFilter(questID)
+    if not Filter.IsActive() then return true end
+    local zoneName = ucState.hereZone or ""
+    if Filter.GetZoneMode() == "done" and not C_QuestLog.IsComplete(questID) then return false end
+    return Filter.ZoneMatches(zoneName, ucState.hereNames) and MatchesSearch(questID, zoneName) or false
+end
+
+-- Feeds the chip strip: counts honour the search text but not the zone chip.
+local function CollectFilterBarData()
+    local data = filterBarData
+    data.all, data.here, data.done, data.hereName = 0, 0, 0, ucState.hereZone or ""
+    wipe(zoneChipCounts); wipe(data.zones)
+    local seen = {}
+    for i = 1, #trackerQuests do
+        local questID = trackerQuests[i]
+        if questID and not seen[questID] then
+            seen[questID] = true
+            local zoneName = GetQuestZoneName(questID)
+            if MatchesSearch(questID, zoneName) then
+                data.all = data.all + 1
+                if C_QuestLog.IsComplete(questID) then data.done = data.done + 1 end
+                if ucState.hereNames[zoneName:lower()] then
+                    data.here = data.here + 1
+                else
+                    zoneChipCounts[zoneName] = (zoneChipCounts[zoneName] or 0) + 1
+                end
+            end
+        end
+    end
+    for name, count in pairs(zoneChipCounts) do data.zones[#data.zones + 1] = { name = name, count = count } end
+    table.sort(data.zones, function(a, c) return a.name < c.name end)
+    return data
+end
+
+-- Zone groups: the player's current zone first, others keep their order.
+local function OrderZonesHereFirst(order)
+    local first, rest = {}, {}
+    for _, zoneName in ipairs(order) do
+        if ucState.hereNames[zoneName:lower()] then first[#first + 1] = zoneName else rest[#rest + 1] = zoneName end
+    end
+    wipe(order)
+    for _, zoneName in ipairs(first) do order[#order + 1] = zoneName end
+    for _, zoneName in ipairs(rest) do order[#order + 1] = zoneName end
+end
+
+-- Shown after the zone name while its group is collapsed.
+local function ZoneSummary(quests)
+    local done = 0
+    for _, questID in ipairs(quests) do
+        if C_QuestLog.IsComplete(questID) then done = done + 1 end
+    end
+    local active = #quests - done
+    local parts = {}
+    if done > 0 then parts[#parts + 1] = done .. " done" end
+    if active > 0 then parts[#parts + 1] = active .. " in progress" end
+    return "  |cFF999999" .. table.concat(parts, " \194\183 ") .. "|r"
 end
 
 -- ============================================================
@@ -1264,27 +1528,31 @@ local nativeTrackerDriverFrames = setmetatable({}, { __mode = "k" })
 local nativeTrackerOriginalAlphas = setmetatable({}, { __mode = "k" })
 local nativeTrackerShouldBeHidden = false
 local ApplyNativeTrackerSuppression
-local nativeTrackerSuppressionFrame = CreateFrame("Frame")
-nativeTrackerSuppressionFrame:SetScript("OnEvent", function(self)
-    self:UnregisterEvent("PLAYER_REGEN_ENABLED")
-    ApplyNativeTrackerSuppression(nativeTrackerShouldBeHidden)
-end)
-
 ApplyNativeTrackerSuppression = function(shouldHide)
     local changed = nativeTrackerShouldBeHidden ~= (shouldHide and true or false)
     nativeTrackerShouldBeHidden = shouldHide and true or false
-    if addonTable.db and addonTable.db.debugNativeTracker then return end
+    if addonTable.db and addonTable.db.debugNativeTracker then
+        deferred.Cancel("native-visibility")
+        return
+    end
     local frame = ObjectiveTrackerFrame
     if not frame then return end
+    if InCombatLockdown() then
+        if nativeTrackerShouldBeHidden ~= (nativeTrackerDriverFrames[frame] == true) then
+            deferred.Put("native-visibility", function()
+                ApplyNativeTrackerSuppression(nativeTrackerShouldBeHidden)
+            end)
+        else
+            deferred.Cancel("native-visibility")
+        end
+        return
+    end
+    deferred.Cancel("native-visibility")
     -- Blizzard may Show() the container between visibility-driver ticks.
     -- Keep it transparent through those intervals to prevent visible flashes.
     if nativeTrackerShouldBeHidden and (changed or nativeTrackerOriginalAlphas[frame] == nil) then
         -- Do not repeatedly write Blizzard-owned state from combat progress
         -- events. Initial suppression and driver changes wait for regen.
-        if InCombatLockdown() then
-            nativeTrackerSuppressionFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
-            return
-        end
         if nativeTrackerOriginalAlphas[frame] == nil then
             local alpha = frame:GetAlpha()
             if not Secret.CanAccessValue(alpha) or type(alpha) ~= "number" then return end
@@ -1302,14 +1570,8 @@ ApplyNativeTrackerSuppression = function(shouldHide)
         end
     end
     if nativeTrackerShouldBeHidden == (registered == true) then
-        nativeTrackerSuppressionFrame:UnregisterEvent("PLAYER_REGEN_ENABLED")
         return
     end
-    if InCombatLockdown() then
-        nativeTrackerSuppressionFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
-        return
-    end
-    nativeTrackerSuppressionFrame:UnregisterEvent("PLAYER_REGEN_ENABLED")
     if nativeTrackerShouldBeHidden then
         RegisterStateDriver(frame, "visibility", "hide")
         nativeTrackerDriverFrames[frame] = true
@@ -1340,6 +1602,7 @@ local function SetupCustomTracker()
     questItemContainer = CreateFrame("Frame", nil, trackerFrame, "SecureHandlerStateTemplate")
     questItemContainer:SetAllPoints(UIParent)
     RegisterStateDriver(questItemContainer, "visibility", "[combat] hide; show")
+    ReserveQuestItemButtons(16)
 
     trackerBody = CreateFrame("Frame", "UIThingsTrackerBody", trackerFrame, "BackdropTemplate")
     trackerBody:SetMovable(true)
@@ -1377,7 +1640,10 @@ local function SetupCustomTracker()
         if not InCombatLockdown() and not addonTable.db.locked then self:StartMoving() end
     end)
     trackerBody:SetScript("OnDragStop", function(self)
-        if InCombatLockdown() then pendingMoveStop = true; return end
+        if InCombatLockdown() then
+            deferred.Put("stop-moving", function() trackerBody:StopMovingOrSizing() end)
+            return
+        end
         self:StopMovingOrSizing()
         local point, _, relativePoint, x, y = self:GetPoint()
         x = math.floor(x + 0.5)
@@ -1391,7 +1657,18 @@ local function SetupCustomTracker()
 
     -- Scroll frame
     scrollFrame = CreateFrame("ScrollFrame", "UIThingsTrackerScroll", trackerBody, "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", headerFrame_, "BOTTOMLEFT", 10, -5)
+    local filterBar = addonTable.FilterBar and addonTable.FilterBar.Create(trackerBody, headerFrame_, function()
+        if InCombatLockdown() then
+            deferred.Put("filter-update", function() UpdateContent() end)
+        else
+            UpdateContent()
+        end
+    end)
+    if filterBar then
+        scrollFrame:SetPoint("TOPLEFT", filterBar, "BOTTOMLEFT", 0, -4)
+    else
+        scrollFrame:SetPoint("TOPLEFT", headerFrame_, "BOTTOMLEFT", 10, -5)
+    end
     scrollFrame:SetPoint("BOTTOMRIGHT", -25, 10)
 
     scrollChild = CreateFrame("Frame", nil, scrollFrame)
@@ -1411,7 +1688,10 @@ local function SetupCustomTracker()
         if not InCombatLockdown() and not addonTable.db.locked then trackerBody:StartSizing("BOTTOMRIGHT") end
     end)
     resizeHandle:SetScript("OnMouseUp", function()
-        if InCombatLockdown() then pendingMoveStop = true; return end
+        if InCombatLockdown() then
+            deferred.Put("stop-moving", function() trackerBody:StopMovingOrSizing() end)
+            return
+        end
         trackerBody:StopMovingOrSizing()
         local w, h = trackerBody:GetSize()
         addonTable.db.width = w
@@ -1420,6 +1700,10 @@ local function SetupCustomTracker()
 end
 
 local function StopRuntime()
+    deferred.Clear()
+    questModel.Clear()
+    if trackerBody and not InCombatLockdown() then trackerBody:StopMovingOrSizing() end
+    ReleaseQuestItemButtons()
     runtimeGeneration = runtimeGeneration + 1
     trackingGeneration = trackingGeneration + 1
     wipe(pendingAutoTrack)
@@ -1516,6 +1800,10 @@ local function ApplyTrackerState(force)
             if inCombat then
                 trackerFrame:SetAlpha(state == "visible" and 1 or 0)
                 trackerStatePendingCombatApply = true
+                deferred.Put("tracker-state", function()
+                    ApplyTrackerState(true)
+                    if UpdateContent then UpdateContent() end
+                end)
             else
                 trackerStatePendingCombatApply = false
                 trackerFrame:SetAlpha(1)
@@ -1542,12 +1830,19 @@ end
 -- ============================================================
 -- UpdateSettings
 -- ============================================================
+function addonTable.ObjectiveTracker.RequestSettingsUpdate()
+    deferred.Put("settings", function()
+        addonTable.ObjectiveTracker.UpdateSettings()
+        if UpdateContent then UpdateContent() end
+    end)
+end
+
 function addonTable.ObjectiveTracker.UpdateSettings()
     if InCombatLockdown() then
-        pendingSettingsUpdate = true
+        addonTable.ObjectiveTracker.RequestSettingsUpdate()
         return
     end
-    pendingSettingsUpdate = false
+    deferred.Cancel("settings")
     runtimeGeneration = runtimeGeneration + 1
     trackingGeneration = trackingGeneration + 1
     local enabled = addonTable.db.enabled
@@ -1643,27 +1938,11 @@ function addonTable.ObjectiveTracker.UpdateSettings()
     ApplyTrackerState(true)
 end
 
--- Independent of trackerFrame: settings can be enabled during combat before
--- the custom frame exists, or disabled while its content events are stopped.
-local settingsReplayFrame = CreateFrame("Frame")
-settingsReplayFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
-settingsReplayFrame:SetScript("OnEvent", function()
-    if pendingMoveStop and trackerBody then
-        pendingMoveStop = false
-        trackerBody:StopMovingOrSizing()
-    end
-    if pendingSettingsUpdate then
-        addonTable.ObjectiveTracker.UpdateSettings()
-        if UpdateContent then UpdateContent() end
-    end
-    if ReplayPendingTracking then ReplayPendingTracking() end
-    SyncQuestItemControls()
-end)
-
 local function RenderSingleWQ(questID, superTrackedQuestID)
     if not displayedIDs[questID] then
         local title = C_QuestLog.GetTitleForQuestID(questID)
         if title then
+            ucState.filterMatches = ucState.filterMatches + 1
             title = GetWQRewardIcon(questID) .. GetQuestTypePrefix(questID) .. title
             local color = nil
             if questID == superTrackedQuestID then
@@ -1743,6 +2022,15 @@ local function RenderWorldQuests()
     else
         table.sort(activeWQs, sortByTimeLeft); table.sort(otherWQs, sortByTimeLeft)
     end
+    if Filter.IsActive() then
+        for _, list in ipairs({ activeWQs, otherWQs }) do
+            local kept = 0
+            for i = 1, #list do
+                if WorldQuestPassesFilter(list[i]) then kept = kept + 1; list[kept] = list[i] end
+            end
+            for i = #list, kept + 1, -1 do list[i] = nil end
+        end
+    end
     local hasWQs = (#activeWQs > 0) or (#otherWQs > 0)
     if hasWQs then
         local wqCount = #activeWQs + #otherWQs
@@ -1751,7 +2039,7 @@ local function RenderWorldQuests()
             ucState.yOffset = ucState.yOffset - ITEM_SPACING
             return
         end
-        if superTrackedQuestID and validWQs[superTrackedQuestID] then
+        if superTrackedQuestID and validWQs[superTrackedQuestID] and WorldQuestPassesFilter(superTrackedQuestID) then
             RenderSingleWQ(superTrackedQuestID, superTrackedQuestID)
         end
         for _, questID in ipairs(activeWQs) do RenderSingleWQ(questID, superTrackedQuestID) end
@@ -1777,7 +2065,7 @@ local function RenderQuests()
             end
         end
     end
-    if #hiddenTaskQuests > 0 then
+    if #hiddenTaskQuests > 0 and not Filter.IsActive() then
         AddLine("Temporary Objectives", true, "tempObjectives")
         if not addonTable.db.collapsed["tempObjectives"] then
             for _, questID in ipairs(hiddenTaskQuests) do
@@ -1806,18 +2094,18 @@ local function RenderQuests()
         end
     end
 
-    local numQuests = C_QuestLog.GetNumQuestWatches()
+    local numQuests = #trackerQuests
     if numQuests > 0 then
         local superTrackedQuestID = C_SuperTrack.GetSuperTrackedQuestID()
         local superTrackedIndex = nil
         wipe(filteredIndices)
         for i = 1, numQuests do
-            local qID = C_QuestLog.GetQuestIDForQuestWatchIndex(i)
+            local qID = trackerQuests[i]
             if qID then
                 if campaignQuestsSectionActive and
                     C_CampaignInfo and C_CampaignInfo.IsCampaignQuest and C_CampaignInfo.IsCampaignQuest(qID) then
                     -- skip — rendered in campaignQuests section
-                elseif not displayedIDs[qID] then
+                elseif not displayedIDs[qID] and QuestPassesFilter(qID) then
                     if qID == superTrackedQuestID then
                         superTrackedIndex = i
                     else
@@ -1842,7 +2130,8 @@ local function RenderQuests()
                 if extraIndent then ucState.indent = extraIndent end
                 local title = C_QuestLog.GetTitleForQuestID(questID)
                 if title then
-                    title = GetQuestTypePrefix(questID) .. title
+                    ucState.filterMatches = ucState.filterMatches + 1
+                    title = GetQuestTypePrefix(questID) .. title .. GetQuestLevelSuffix(questID) .. GetUntrackedSuffix(questID)
                     local color = nil
                     if questID == superTrackedQuestID then
                         color = addonTable.db.activeQuestColor
@@ -1893,8 +2182,16 @@ local function RenderQuests()
                 if extraIndent then ucState.indent = 0 end
             end
 
-            local function RenderGroupHeader(groupKey, label, quests, colorR, colorG, colorB)
+            local function RenderGroupHeader(groupKey, label, quests, colorR, colorG, colorB, opts)
                 local isCollapsed = addonTable.db.collapsed[groupKey]
+                if opts and opts.zone and isCollapsed == nil then
+                    -- Untouched zone groups: only the current zone starts open (a
+                    -- zone picked with a chip is always open, or it would look empty).
+                    isCollapsed = not (opts.isHere or Filter.GetZoneMode() ~= "all")
+                end
+                -- Searching expands everything so matches are never hidden.
+                local forceOpen = Filter.IsSearching()
+                if forceOpen then isCollapsed = false end
                 local btn = AcquireItem()
                 btn:Show()
                 btn.questID = nil; btn.achieID = nil
@@ -1902,7 +2199,9 @@ local function RenderQuests()
                 btn:SetWidth(ucState.width)
                 btn:SetPoint("TOPLEFT", 0, ucState.yOffset)
                 btn.Text:SetFont(ucState.questNameFont, ucState.questNameSize, "")
-                btn.Text:SetText(label .. " (" .. #quests .. ")")
+                local headerText = label .. " (" .. #quests .. ")"
+                if isCollapsed and opts and opts.zone then headerText = headerText .. ZoneSummary(quests) end
+                btn.Text:SetText(headerText)
                 btn.Text:SetTextColor(colorR, colorG, colorB)
                 btn.Icon:Hide()
                 btn.Text:ClearAllPoints()
@@ -1911,7 +2210,7 @@ local function RenderQuests()
                 btn:EnableMouse(false)
                 btn:SetScript("OnEnter", nil); btn:SetScript("OnLeave", nil)
                 if btn.ItemBtn and not InCombatLockdown() then btn.ItemBtn:Hide() end
-                btn.ToggleBtn:Show()
+                if forceOpen then btn.ToggleBtn:Hide() else btn.ToggleBtn:Show() end
                 btn.ToggleBtn:SetScript("OnClick", function(self, button)
                     if InCombatLockdown() and button == "LeftButton" then return end
                     addonTable.db.collapsed[groupKey] = not isCollapsed
@@ -1932,7 +2231,7 @@ local function RenderQuests()
 
             local function RenderFlatQuests(indices)
                 for _, i in ipairs(indices) do
-                    local questID = C_QuestLog.GetQuestIDForQuestWatchIndex(i)
+                    local questID = trackerQuests[i]
                     if questID then RenderSingleQuest(questID) end
                 end
             end
@@ -1941,12 +2240,7 @@ local function RenderQuests()
                 wipe(zoneOrder); wipe(questsByZone)
                 for _, questID in ipairs(questIDs) do
                     if not displayedIDs[questID] then
-                        local zoneName = "Other"
-                        local headerIndex = C_QuestLog.GetHeaderIndexForQuest(questID)
-                        if headerIndex then
-                            local headerInfo = C_QuestLog.GetInfo(headerIndex)
-                            if headerInfo and headerInfo.title then zoneName = headerInfo.title end
-                        end
+                        local zoneName = GetQuestZoneName(questID)
                         if not questsByZone[zoneName] then
                             questsByZone[zoneName] = {}; table.insert(zoneOrder, zoneName)
                         end
@@ -1958,8 +2252,10 @@ local function RenderQuests()
                         table.sort(questsByZone[zoneName], sortByDistanceSq)
                     end
                 end
+                OrderZonesHereFirst(zoneOrder)
                 for _, zoneName in ipairs(zoneOrder) do
-                    RenderGroupHeader("zone_" .. zoneName, zoneName, questsByZone[zoneName], 0.7, 0.85, 1.0)
+                    RenderGroupHeader("zone_" .. zoneName, zoneName, questsByZone[zoneName], 0.7, 0.85, 1.0,
+                        { zone = true, isHere = ucState.hereNames[zoneName:lower()] == true })
                 end
             end
 
@@ -1968,7 +2264,7 @@ local function RenderQuests()
 
             if useCampaignGroup or useZoneGroup then
                 if superTrackedIndex then
-                    local stQuestID = C_QuestLog.GetQuestIDForQuestWatchIndex(superTrackedIndex)
+                    local stQuestID = trackerQuests[superTrackedIndex]
                     if stQuestID then RenderSingleQuest(stQuestID) end
                 end
             end
@@ -1976,7 +2272,7 @@ local function RenderQuests()
             if useCampaignGroup then
                 wipe(campaignOrder); wipe(questsByCampaign); wipe(nonCampaignQuests)
                 for _, i in ipairs(filteredIndices) do
-                    local questID = C_QuestLog.GetQuestIDForQuestWatchIndex(i)
+                    local questID = trackerQuests[i]
                     if questID and not displayedIDs[questID] then
                         local campaignID = C_CampaignInfo.GetCampaignID(questID)
                         if campaignID and campaignID > 0 then
@@ -2010,7 +2306,7 @@ local function RenderQuests()
             elseif useZoneGroup then
                 local questIDs = {}
                 for _, i in ipairs(filteredIndices) do
-                    local questID = C_QuestLog.GetQuestIDForQuestWatchIndex(i)
+                    local questID = trackerQuests[i]
                     if questID and not displayedIDs[questID] then table.insert(questIDs, questID) end
                 end
                 RenderByZone(questIDs)
@@ -2185,7 +2481,8 @@ local function RenderScenarios()
 end
 
 local function RenderAchievements()
-    local trackedAchievements = C_ContentTracking.GetTrackedIDs(Enum.ContentTrackingType.Achievement)
+    local trackedAchievements = C_ContentTracking and Enum and Enum.ContentTrackingType
+        and C_ContentTracking.GetTrackedIDs(Enum.ContentTrackingType.Achievement) or {}
     wipe(validAchievements)
     for _, achID in ipairs(trackedAchievements) do
         local _, name = GetAchievementInfo(achID)
@@ -2347,15 +2644,16 @@ local function RenderTravelersLog()
 end
 
 local function RenderCampaignQuests()
-    local numQuests = C_QuestLog.GetNumQuestWatches()
+    local numQuests = #trackerQuests
     if numQuests == 0 then return end
     local superTrackedQuestID = C_SuperTrack.GetSuperTrackedQuestID()
     wipe(campaignOrder); wipe(questsByCampaign)
     local flatCampaignQuests = {}
     for i = 1, numQuests do
-        local questID = C_QuestLog.GetQuestIDForQuestWatchIndex(i)
+        local questID = trackerQuests[i]
         if questID and not displayedIDs[questID] then
-            if C_CampaignInfo and C_CampaignInfo.IsCampaignQuest and C_CampaignInfo.IsCampaignQuest(questID) then
+            if C_CampaignInfo and C_CampaignInfo.IsCampaignQuest and C_CampaignInfo.IsCampaignQuest(questID)
+                and QuestPassesFilter(questID) then
                 local campaignID = C_CampaignInfo.GetCampaignID(questID)
                 local campaignName = "Campaign"
                 if campaignID and campaignID > 0 then
@@ -2386,7 +2684,8 @@ local function RenderCampaignQuests()
         if extraIndent then ucState.indent = extraIndent end
         local title = C_QuestLog.GetTitleForQuestID(questID)
         if title then
-            title = GetQuestTypePrefix(questID) .. title
+            ucState.filterMatches = ucState.filterMatches + 1
+            title = GetQuestTypePrefix(questID) .. title .. GetQuestLevelSuffix(questID) .. GetUntrackedSuffix(questID)
             local color
             if questID == superTrackedQuestID then
                 color = addonTable.db.activeQuestColor
@@ -2429,7 +2728,8 @@ local function RenderCampaignQuests()
     end
 
     if superTrackedQuestID and not displayedIDs[superTrackedQuestID] then
-        if C_CampaignInfo and C_CampaignInfo.IsCampaignQuest and C_CampaignInfo.IsCampaignQuest(superTrackedQuestID) then
+        if C_CampaignInfo and C_CampaignInfo.IsCampaignQuest and C_CampaignInfo.IsCampaignQuest(superTrackedQuestID)
+            and QuestPassesFilter(superTrackedQuestID) then
             RenderOneCampaignQuest(superTrackedQuestID)
         end
     end
@@ -2497,6 +2797,7 @@ local sectionRenderers = {
 -- Only updates addon-owned text and unprotected progress bars. No row
 -- acquisition, layout or secure item attributes are changed in combat.
 local function RefreshCombatObjectives()
+    questModel.BeginPass()
     local cache = {}
     local superTrackedQuestID = C_SuperTrack.GetSuperTrackedQuestID()
     local canRefreshHighlight = type(superTrackedQuestID) == "number"
@@ -2525,9 +2826,13 @@ local function RefreshCombatObjectives()
                 local text, finished = objective.text, objective.finished
                 if Secret.CanAccessValue(text) and type(text) == "string" and text ~= ""
                     and Secret.CanAccessValue(finished) and type(finished) == "boolean" then
-                    row.Text:SetText(finished and FormatCompletedObjective(text) or text)
+                    local displayText = finished and FormatCompletedObjective(text) or text
+                    if row.lastLiveText ~= displayText then
+                        row.Text:SetText(displayText)
+                        row.lastLiveText = displayText
+                    end
                     local progress, hasProgress = GetObjectiveProgress(text)
-                    if type(objective.numFulfilled) == "number" and type(objective.numRequired) == "number"
+                    if objective.freshCounters and type(objective.numFulfilled) == "number" and type(objective.numRequired) == "number"
                         and objective.numRequired > 0 then
                         progress = objective.numFulfilled / objective.numRequired * 100
                         hasProgress = true
@@ -2539,11 +2844,19 @@ local function RefreshCombatObjectives()
                         row.ProgressBar:Hide()
                     end
                 end
+            elseif objectives then
+                -- An accessible shorter list is different from a failed read.
+                row.Text:SetText("")
+                row.lastLiveText = ""
+                if not row.ProgressBar:IsProtected() then row.ProgressBar:Hide() end
             end
         end
         if not row.released and row.combatRefresh then
             local ok, text = pcall(row.combatRefresh, cache)
-            if ok and Secret.CanAccessValue(text) and type(text) == "string" then row.Text:SetText(text) end
+            if ok and Secret.CanAccessValue(text) and type(text) == "string" and row.lastLiveText ~= text then
+                row.Text:SetText(text)
+                row.lastLiveText = text
+            end
         end
     end
 end
@@ -2555,6 +2868,8 @@ UpdateContent = function()
         RefreshCombatObjectives()
         return
     end
+
+    questModel.BeginPass()
 
     ReleaseItems()
 
@@ -2583,6 +2898,11 @@ UpdateContent = function()
 
     addonTable.db.collapsed = addonTable.db.collapsed or {}
     wipe(displayedIDs)
+    wipe(zoneNameCache); wipe(filterResultCache)
+    BuildTrackerQuestList()
+    ucState.hereNames, ucState.hereZone = Filter.GetHereNames()
+    ucState.filterMatches = 0
+    local filterActive = Filter.IsActive()
 
     local orderList = addonTable.db.sectionOrderList
     if not orderList then
@@ -2650,8 +2970,15 @@ UpdateContent = function()
 
     for _, sectionKey in ipairs(orderList) do
         local renderer = sectionRenderers[sectionKey]
-        if renderer then renderer() end
+        -- Achievements and the traveler's log are not searchable: hide them while filtering.
+        if renderer and not (filterActive and (sectionKey == "achievements" or sectionKey == "travelersLog")) then
+            renderer()
+        end
     end
+    if filterActive and ucState.filterMatches == 0 then
+        AddLine("|cFF999999No tracked quests match your filter.|r", false, nil, nil, true, nil, nil, true)
+    end
+    if addonTable.FilterBar then addonTable.FilterBar.Update(CollectFilterBarData()) end
 
     -- If we proximity-tracked a WQ and it's no longer in the display, restore the
     -- saved campaign quest. validWQs is repopulated by RenderWorldQuests each frame.
@@ -2694,7 +3021,7 @@ end
 local function AutoTrackQuest(questID)
     if not addonTable.db or not addonTable.db.enabled or not addonTable.db.autoTrackQuests then return end
     if not Secret.CanAccessValue(questID) or type(questID) ~= "number" or questID <= 0 then return end
-    if InCombatLockdown() then pendingAutoTrack[questID] = true; return end
+    if InCombatLockdown() then pendingAutoTrack[questID] = true; QueueTrackingReplay(); return end
     if C_QuestLog.IsOnQuest(questID) ~= true then return end
     if not C_QuestLog.GetQuestWatchType(questID) then
         C_QuestLog.AddQuestWatch(questID, Enum.QuestWatchType.Automatic)
@@ -2732,7 +3059,10 @@ end
 
 autoTrackFrame = CreateFrame("Frame")
 autoTrackFrame:SetScript("OnEvent", function(self, event, questID)
-    if event == "QUEST_ACCEPTED" then AutoTrackQuest(questID) end
+    if event == "QUEST_ACCEPTED" then
+        if Secret.CanAccessValue(questID) and type(questID) == "number" then questModel.Forget(questID) end
+        AutoTrackQuest(questID)
+    end
 end)
 
 -- ============================================================
@@ -2795,11 +3125,8 @@ SetupTrackerEvents = function()
         elseif event == "PLAYER_REGEN_DISABLED" then
             ApplyTrackerState()
         elseif event == "PLAYER_REGEN_ENABLED" then
-            if pendingQuestItemUpdate then
-                pendingQuestItemUpdate = nil
-                UpdateQuestItemButton()
-            end
-            ReplayPendingTracking()
+            deferred.Put("quest-item-binding", UpdateQuestItemButton)
+            deferred.Put("quest-item-position", SyncQuestItemControls)
             UpdateContent()
         elseif event == "CHALLENGE_MODE_START"
             or event == "CHALLENGE_MODE_COMPLETED"
@@ -2831,9 +3158,14 @@ SetupTrackerEvents = function()
             ScheduleUpdateContent()
         elseif event == "WORLD_STATE_TIMER_STOP" then
             ScheduleUpdateContent()
+        elseif event == "QUEST_ACCEPTED" then
+            local questID = ...
+            if Secret.CanAccessValue(questID) and type(questID) == "number" then questModel.Forget(questID) end
+            ScheduleUpdateContent()
         elseif event == "QUEST_REMOVED" then
             local questID = ...
             if Secret.CanAccessValue(questID) and type(questID) == "number" then
+                questModel.Forget(questID)
                 pendingAutoTrack[questID] = nil
                 prevObjectiveState[questID] = nil
                 prevQuestComplete[questID] = nil
@@ -2847,6 +3179,7 @@ SetupTrackerEvents = function()
                     if currentST == questID then
                         if InCombatLockdown() then
                             pendingRestoreTrack = true
+                            QueueTrackingReplay()
                         elseif savedSuperTrackedQuestID
                             and C_QuestLog.IsOnQuest(savedSuperTrackedQuestID)
                             and C_QuestLog.GetQuestWatchType(savedSuperTrackedQuestID) then

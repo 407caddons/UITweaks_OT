@@ -37,11 +37,13 @@ function addonTable.Config.Initialize()
     configWindow:SetScript("OnDragStop", configWindow.StopMovingOrSizing)
 
     configWindow:SetScript("OnHide", function()
-        -- Auto-lock tracker on config close
-        if addonTable.db then
+        -- Keep Escape-to-close, but avoid running tracker/native visibility
+        -- changes inline in Blizzard's CloseSpecialWindows call chain.
+        if addonTable.db and not addonTable.db.locked then
             addonTable.db.locked = true
-            if addonTable.ObjectiveTracker and addonTable.ObjectiveTracker.UpdateSettings then
-                addonTable.ObjectiveTracker.UpdateSettings()
+            local tracker = addonTable.ObjectiveTracker
+            if tracker and tracker.RequestSettingsUpdate then
+                tracker.RequestSettingsUpdate()
             end
         end
     end)

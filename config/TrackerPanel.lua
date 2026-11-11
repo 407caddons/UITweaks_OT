@@ -26,6 +26,37 @@ local function SetCheckButtonLabel(button, text)
     return label
 end
 
+-- Blizzard's slider template draws its title and min/max captions with regions
+-- that can end up hidden or covered. Replace them with addon-owned font strings,
+-- published under the same globals so the existing `_G[name .. "Text"]` code keeps working.
+local function CreateLabeledSlider(name, parent)
+    local slider = CreateFrame("Slider", name, parent, "OptionsSliderTemplate")
+    -- The template's captions may be reachable only through parentKeys (slider.Low)
+    -- rather than the globals, so blank every font string it created.
+    for _, region in ipairs({ slider:GetRegions() }) do
+        if region.GetObjectType and region:GetObjectType() == "FontString" then
+            region:SetText("")
+            region:Hide()
+        end
+    end
+    for _, key in ipairs({ "Text", "Low", "High" }) do
+        local region = slider[key]
+        if type(region) == "table" and region.SetText then region:SetText(""); region:Hide() end
+    end
+    local function Replace(suffix, point, relPoint, x, y, template)
+        local original = _G[name .. suffix]
+        if original then original:SetText(""); original:Hide() end
+        local label = parent:CreateFontString(nil, "OVERLAY", template)
+        label:SetPoint(point, slider, relPoint, x, y)
+        _G[name .. suffix] = label
+        return label
+    end
+    Replace("Text", "BOTTOMLEFT", "TOPLEFT", 0, 4, "GameFontHighlight")
+    Replace("Low", "TOPLEFT", "BOTTOMLEFT", 0, -2, "GameFontNormalSmall")
+    Replace("High", "TOPRIGHT", "BOTTOMRIGHT", 0, -2, "GameFontNormalSmall")
+    return slider
+end
+
 -- Define the setup function for Tracker panel
 function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
     Helpers.CreateResetButton(panel, "tracker")
@@ -106,9 +137,20 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
     lockBtn:SetChecked(addonTable.db.locked)
     lockBtn:SetScript("OnClick", function(self)
         local locked = not not self:GetChecked()
-        addonTable.db.locked = locked
-        UpdateTracker()
+        if LunaUITweaksAPI and LunaUITweaksAPI.SetLayoutMode then
+            LunaUITweaksAPI.SetLayoutMode(not locked)
+            self:SetChecked(not LunaUITweaksAPI.IsLayoutModeActive())
+        else
+            addonTable.db.locked = locked
+            UpdateTracker()
+        end
     end)
+
+    if LunaUITweaksAPI and LunaUITweaksAPI.RegisterLayoutParticipant then
+        LunaUITweaksAPI.RegisterLayoutParticipant("ObjectiveTrackerConfig",function(active)
+            lockBtn:SetChecked(not active)
+        end)
+    end
 
     local hideHeaderBtn = CreateFrame("CheckButton", "UIThingsHideHeaderCheck", panel, "ChatConfigCheckButtonTemplate")
     hideHeaderBtn:SetPoint("TOPLEFT", 20, -74)
@@ -267,8 +309,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
         UpdateTracker()
     end)
 
-    local distIntervalSlider = CreateFrame("Slider", "UIThingsTrackerDistIntervalSlider", panel,
-        "OptionsSliderTemplate")
+    local distIntervalSlider = CreateLabeledSlider("UIThingsTrackerDistIntervalSlider", panel)
     distIntervalSlider:SetPoint("TOPLEFT", 20, -450)
     distIntervalSlider:SetMinMaxValues(0, 30)
     distIntervalSlider:SetValueStep(1)
@@ -303,39 +344,17 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
     wqSortLabel:SetPoint("TOPLEFT", 20, -535)
     wqSortLabel:SetText("Sort World Quests:")
 
-    local wqSortDropdown = CreateFrame("Frame", "UIThingsTrackerWQSortDropdown", panel, "UIDropDownMenuTemplate")
-    wqSortDropdown:SetPoint("TOPLEFT", wqSortLabel, "BOTTOMLEFT", -15, -2)
-
     local wqSortOptions = {
         { text = "By Time",     value = "time" },
         { text = "By Distance", value = "distance" },
     }
 
-    local function WQSortOnClick(self)
-        UIDropDownMenu_SetSelectedValue(wqSortDropdown, self.value)
-        addonTable.db.worldQuestSortBy = self.value
+    local wqSortDropdown = addonTable.ConfigDropdown.Create(panel, "UIThingsTrackerWQSortDropdown",
+        wqSortOptions, addonTable.db.worldQuestSortBy or "time", function(value)
+        addonTable.db.worldQuestSortBy = value
         UpdateTracker()
-    end
-
-    local function WQSortInit(self, level)
-        for _, opt in ipairs(wqSortOptions) do
-            local info = UIDropDownMenu_CreateInfo()
-            info.text = opt.text
-            info.value = opt.value
-            info.func = WQSortOnClick
-            info.checked = (addonTable.db.worldQuestSortBy == opt.value)
-            UIDropDownMenu_AddButton(info, level)
-        end
-    end
-
-    UIDropDownMenu_Initialize(wqSortDropdown, WQSortInit)
-    local currentWQSort = addonTable.db.worldQuestSortBy or "time"
-    for _, opt in ipairs(wqSortOptions) do
-        if opt.value == currentWQSort then
-            UIDropDownMenu_SetText(wqSortDropdown, opt.text)
-            break
-        end
-    end
+    end)
+    wqSortDropdown:SetPoint("TOPLEFT", wqSortLabel, "BOTTOMLEFT", 0, -6)
 
     -------------------------------------------------------------
     -- SECTION: Display (-310)
@@ -430,9 +449,42 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
         UpdateTracker()
     end)
 
+    local questLevelCheckbox = CreateFrame("CheckButton", "UIThingsTrackerQuestLevelCheckbox", panel,
+        "ChatConfigCheckButtonTemplate")
+    questLevelCheckbox:SetPoint("TOPLEFT", 20, -266)
+    questLevelCheckbox:SetHitRectInsets(0, -180, 0, 0)
+    SetCheckButtonLabel(questLevelCheckbox, "Show Quest Level After Name")
+    questLevelCheckbox:SetChecked(addonTable.db.showQuestLevel)
+    questLevelCheckbox:SetScript("OnClick", function(self)
+        addonTable.db.showQuestLevel = self:GetChecked()
+        UpdateTracker()
+    end)
+
+    local questRepCheckbox = CreateFrame("CheckButton", "UIThingsTrackerQuestRepCheckbox", panel,
+        "ChatConfigCheckButtonTemplate")
+    questRepCheckbox:SetPoint("TOPLEFT", 20, -298)
+    questRepCheckbox:SetHitRectInsets(0, -180, 0, 0)
+    SetCheckButtonLabel(questRepCheckbox, "Show Reputation Rewards")
+    questRepCheckbox:SetChecked(addonTable.db.showQuestReputation)
+    questRepCheckbox:SetScript("OnClick", function(self)
+        addonTable.db.showQuestReputation = self:GetChecked()
+        UpdateTracker()
+    end)
+
+    local untrackedCheckbox = CreateFrame("CheckButton", "UIThingsTrackerUntrackedCheckbox", panel,
+        "ChatConfigCheckButtonTemplate")
+    untrackedCheckbox:SetPoint("TOPLEFT", 300, -298)
+    untrackedCheckbox:SetHitRectInsets(0, -150, 0, 0)
+    SetCheckButtonLabel(untrackedCheckbox, "Show Untracked Quests")
+    untrackedCheckbox:SetChecked(addonTable.db.showUntrackedQuests)
+    untrackedCheckbox:SetScript("OnClick", function(self)
+        addonTable.db.showUntrackedQuests = self:GetChecked()
+        UpdateTracker()
+    end)
+
     local tooltipCheckbox = CreateFrame("CheckButton", "UIThingsTrackerTooltipCheckbox", panel,
         "ChatConfigCheckButtonTemplate")
-    tooltipCheckbox:SetPoint("TOPLEFT", 20, -280)
+    tooltipCheckbox:SetPoint("TOPLEFT", 20, -330)
     tooltipCheckbox:SetHitRectInsets(0, -130, 0, 0)
     local tooltipLabel = SetCheckButtonLabel(tooltipCheckbox, "Tooltip Preview (temporarily unavailable)")
     tooltipCheckbox:SetChecked(false)
@@ -643,30 +695,15 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
     channelLabel:SetPoint("TOPLEFT", 20, -205)
     channelLabel:SetText("Sound Channel:")
 
-    local channelDropdown = CreateFrame("Frame", "UIThingsTrackerSoundChannelDropdown", panel, "UIDropDownMenuTemplate")
-    channelDropdown:SetPoint("LEFT", channelLabel, "RIGHT", -5, -2)
-
-    local channelOptions = { "Master", "SFX", "Music", "Ambience", "Dialog" }
-
-    local function ChannelOnClick(self)
-        UIDropDownMenu_SetSelectedValue(channelDropdown, self.value)
-        addonTable.db.soundChannel = self.value
+    local channelOptions = {}
+    for _, channel in ipairs({ "Master", "SFX", "Music", "Ambience", "Dialog" }) do
+        channelOptions[#channelOptions + 1] = { text = channel, value = channel }
     end
-
-    local function ChannelInit(self, level)
-        for _, ch in ipairs(channelOptions) do
-            local info = UIDropDownMenu_CreateInfo()
-            info.text = ch
-            info.value = ch
-            info.func = ChannelOnClick
-            info.checked = (addonTable.db.soundChannel == ch)
-            UIDropDownMenu_AddButton(info, level)
-        end
-    end
-
-    UIDropDownMenu_Initialize(channelDropdown, ChannelInit)
-    UIDropDownMenu_SetText(channelDropdown, addonTable.db.soundChannel or "Master")
-    UIDropDownMenu_SetWidth(channelDropdown, 90)
+    local channelDropdown = addonTable.ConfigDropdown.Create(panel, "UIThingsTrackerSoundChannelDropdown",
+        channelOptions, addonTable.db.soundChannel or "Master", function(value)
+        addonTable.db.soundChannel = value
+    end, 130)
+    channelDropdown:SetPoint("LEFT", channelLabel, "RIGHT", 10, 0)
 
     local muteDefaultCheckbox = CreateFrame("CheckButton", "UIThingsTrackerMuteDefaultCheckbox", panel,
         "ChatConfigCheckButtonTemplate")
@@ -684,7 +721,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
     -------------------------------------------------------------
     panel = CreatePage("Size & Position", "Adjust tracker dimensions, spacing and frame layer.")
 
-    local widthSlider = CreateFrame("Slider", "UIThingsWidthSlider", panel, "OptionsSliderTemplate")
+    local widthSlider = CreateLabeledSlider("UIThingsWidthSlider", panel)
     widthSlider:SetPoint("TOPLEFT", 20, -35)
     widthSlider:SetMinMaxValues(100, 600)
     widthSlider:SetValueStep(10)
@@ -701,7 +738,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
         UpdateTracker()
     end)
 
-    local heightSlider = CreateFrame("Slider", "UIThingsHeightSlider", panel, "OptionsSliderTemplate")
+    local heightSlider = CreateLabeledSlider("UIThingsHeightSlider", panel)
     heightSlider:SetPoint("TOPLEFT", 20, -105)
     heightSlider:SetMinMaxValues(100, 1000)
     heightSlider:SetValueStep(10)
@@ -718,7 +755,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
         UpdateTracker()
     end)
 
-    local paddingSlider = CreateFrame("Slider", "UIThingsTrackerPaddingSlider", panel, "OptionsSliderTemplate")
+    local paddingSlider = CreateLabeledSlider("UIThingsTrackerPaddingSlider", panel)
     paddingSlider:SetPoint("TOPLEFT", 20, -175)
     paddingSlider:SetMinMaxValues(0, 20)
     paddingSlider:SetValueStep(1)
@@ -736,8 +773,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
         UpdateTracker()
     end)
 
-    local sectionSpacingSlider = CreateFrame("Slider", "UIThingsTrackerSectionSpacingSlider", panel,
-        "OptionsSliderTemplate")
+    local sectionSpacingSlider = CreateLabeledSlider("UIThingsTrackerSectionSpacingSlider", panel)
     sectionSpacingSlider:SetPoint("TOPLEFT", 20, -245)
     sectionSpacingSlider:SetMinMaxValues(0, 30)
     sectionSpacingSlider:SetValueStep(1)
@@ -755,7 +791,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
         UpdateTracker()
     end)
 
-    local itemSpacingSlider = CreateFrame("Slider", "UIThingsTrackerItemSpacingSlider", panel, "OptionsSliderTemplate")
+    local itemSpacingSlider = CreateLabeledSlider("UIThingsTrackerItemSpacingSlider", panel)
     itemSpacingSlider:SetPoint("TOPLEFT", 20, -315)
     itemSpacingSlider:SetMinMaxValues(0, 20)
     itemSpacingSlider:SetValueStep(1)
@@ -777,29 +813,16 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
     trackerStrataLabel:SetPoint("TOPLEFT", 20, -360)
     trackerStrataLabel:SetText("Strata:")
 
-    local trackerStrataDropdown = CreateFrame("Frame", "UIThingsTrackerStrataDropdown", panel,
-        "UIDropDownMenuTemplate")
-    trackerStrataDropdown:SetPoint("TOPLEFT", trackerStrataLabel, "BOTTOMLEFT", -15, -5)
-
-    local function TrackerStrataOnClick(self)
-        UIDropDownMenu_SetSelectedID(trackerStrataDropdown, self:GetID())
-        addonTable.db.strata = self.value
+    local strataOptions = {}
+    for _, strata in ipairs({ "BACKGROUND", "LOW", "MEDIUM", "HIGH", "DIALOG", "FULLSCREEN", "TOOLTIP" }) do
+        strataOptions[#strataOptions + 1] = { text = strata, value = strata }
+    end
+    local trackerStrataDropdown = addonTable.ConfigDropdown.Create(panel, "UIThingsTrackerStrataDropdown",
+        strataOptions, addonTable.db.strata or "LOW", function(value)
+        addonTable.db.strata = value
         UpdateTracker()
-    end
-
-    local function TrackerStrataInit(self, level)
-        local stratas = { "BACKGROUND", "LOW", "MEDIUM", "HIGH", "DIALOG", "FULLSCREEN", "TOOLTIP" }
-        for _, s in ipairs(stratas) do
-            local info = UIDropDownMenu_CreateInfo()
-            info.text = s
-            info.value = s
-            info.func = TrackerStrataOnClick
-            UIDropDownMenu_AddButton(info, level)
-        end
-    end
-
-    UIDropDownMenu_Initialize(trackerStrataDropdown, TrackerStrataInit)
-    UIDropDownMenu_SetText(trackerStrataDropdown, addonTable.db.strata or "LOW")
+    end)
+    trackerStrataDropdown:SetPoint("TOPLEFT", trackerStrataLabel, "BOTTOMLEFT", 0, -6)
 
     -------------------------------------------------------------
     -- SECTION: Fonts (-745)
@@ -819,8 +842,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
         -37
     )
 
-    local headerSizeSlider = CreateFrame("Slider", "UIThingsTrackerHeaderSizeSlider", panel,
-        "OptionsSliderTemplate")
+    local headerSizeSlider = CreateLabeledSlider("UIThingsTrackerHeaderSizeSlider", panel)
     headerSizeSlider:SetPoint("TOPLEFT", 20, -100)
     headerSizeSlider:SetMinMaxValues(8, 32)
     headerSizeSlider:SetValueStep(1)
@@ -850,8 +872,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
         -187
     )
 
-    local detailSizeSlider = CreateFrame("Slider", "UIThingsTrackerDetailSizeSlider", panel,
-        "OptionsSliderTemplate")
+    local detailSizeSlider = CreateLabeledSlider("UIThingsTrackerDetailSizeSlider", panel)
     detailSizeSlider:SetPoint("TOPLEFT", 20, -250)
     detailSizeSlider:SetMinMaxValues(8, 32)
     detailSizeSlider:SetValueStep(1)
@@ -881,8 +902,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
         -337
     )
 
-    local sectionSizeSlider = CreateFrame("Slider", "UIThingsTrackerSectionSizeSlider", panel,
-        "OptionsSliderTemplate")
+    local sectionSizeSlider = CreateLabeledSlider("UIThingsTrackerSectionSizeSlider", panel)
     sectionSizeSlider:SetPoint("TOPLEFT", 20, -400)
     sectionSizeSlider:SetMinMaxValues(8, 32)
     sectionSizeSlider:SetValueStep(1)
@@ -923,7 +943,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
     sectionColorSwatch:SetBackdropBorderColor(1, 1, 1)
 
     sectionColorSwatch:SetScript("OnClick", function(self)
-        local info = UIDropDownMenu_CreateInfo()
+        local info = {}
         local prevR, prevG, prevB, prevA = shc.r, shc.g, shc.b, shc.a
         info.r, info.g, info.b, info.opacity = prevR, prevG, prevB, prevA
         info.hasOpacity = true
@@ -970,7 +990,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
     activeColorSwatch:SetBackdropBorderColor(1, 1, 1)
 
     activeColorSwatch:SetScript("OnClick", function(self)
-        local info = UIDropDownMenu_CreateInfo()
+        local info = {}
         local prevR, prevG, prevB, prevA = ac.r, ac.g, ac.b, ac.a
         info.r, info.g, info.b, info.opacity = prevR, prevG, prevB, prevA
         info.hasOpacity = true
@@ -1014,7 +1034,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
     campaignColorSwatch:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
     campaignColorSwatch:SetBackdropBorderColor(1, 1, 1)
     campaignColorSwatch:SetScript("OnClick", function(self)
-        local info = UIDropDownMenu_CreateInfo()
+        local info = {}
         local prevR, prevG, prevB, prevA = cqc.r, cqc.g, cqc.b, cqc.a
         info.r, info.g, info.b, info.opacity = prevR, prevG, prevB, prevA
         info.hasOpacity = true
@@ -1053,7 +1073,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
     questNameColorSwatch:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
     questNameColorSwatch:SetBackdropBorderColor(1, 1, 1)
     questNameColorSwatch:SetScript("OnClick", function(self)
-        local info = UIDropDownMenu_CreateInfo()
+        local info = {}
         local prevR, prevG, prevB, prevA = qnc.r, qnc.g, qnc.b, qnc.a
         info.r, info.g, info.b, info.opacity = prevR, prevG, prevB, prevA
         info.hasOpacity = true
@@ -1091,7 +1111,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
     objColorSwatch:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 })
     objColorSwatch:SetBackdropBorderColor(1, 1, 1)
     objColorSwatch:SetScript("OnClick", function(self)
-        local info = UIDropDownMenu_CreateInfo()
+        local info = {}
         local prevR, prevG, prevB, prevA = occ.r, occ.g, occ.b, occ.a
         info.r, info.g, info.b, info.opacity = prevR, prevG, prevB, prevA
         info.hasOpacity = true
@@ -1144,7 +1164,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
     borderColorSwatch:SetBackdropBorderColor(1, 1, 1)
 
     borderColorSwatch:SetScript("OnClick", function(self)
-        local info = UIDropDownMenu_CreateInfo()
+        local info = {}
         local prevR, prevG, prevB, prevA = bc.r, bc.g, bc.b, bc.a
         info.r, info.g, info.b, info.opacity = prevR, prevG, prevB, prevA
         info.hasOpacity = true
@@ -1202,7 +1222,7 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
     bgColorSwatch:SetBackdropBorderColor(1, 1, 1)
 
     bgColorSwatch:SetScript("OnClick", function(self)
-        local info = UIDropDownMenu_CreateInfo()
+        local info = {}
         local prevR, prevG, prevB, prevA = c.r, c.g, c.b, c.a
         info.r, info.g, info.b, info.opacity = prevR, prevG, prevB, prevA
         info.hasOpacity = true
