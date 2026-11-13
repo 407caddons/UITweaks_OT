@@ -103,6 +103,7 @@ local DEFAULTS = {
     groupQuestsByCampaign = false,
     worldQuestSortBy = "time",
     showQuestDistance = true,
+    showQuestXP = true,
     sortQuestsByDistance = false,
     showTooltipPreview = true,
     hideHeader = false,

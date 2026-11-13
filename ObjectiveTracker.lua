@@ -601,20 +601,42 @@ local function AddTimerLine(questID)
 end
 
 local useMetric = not (GetLocale() == "enUS" or GetLocale() == "enGB")
-local function GetDistanceString(questID)
-    if not addonTable.db.showQuestDistance then return "" end
-    local distSq = C_QuestLog.GetDistanceSqToQuest(questID)
-    if not distSq or distSq < 0 then return "" end
-    local dist = math.sqrt(distSq)
-    local unit = "yds"
-    if useMetric then
-        dist = dist * 0.9144; unit = "m"
-    end
-    if dist >= 1000 then
-        return string.format(" |cFFAAAAAA(%.1fk %s)|r", dist / 1000, unit)
+-- Last readable XP reward per quest. The API can return a secret value in
+-- combat; the cached number is shown instead and never compared when secret.
+local questXPCache = {}
+local function GetQuestXPText(questID)
+    if not addonTable.db.showQuestXP or not GetQuestLogRewardXP then return nil end
+    local ok, xp = pcall(GetQuestLogRewardXP, questID)
+    if ok and type(xp) == "number" and Secret.CanAccessValue(xp) then
+        questXPCache[questID] = xp
     else
-        return string.format(" |cFFAAAAAA(%d %s)|r", dist, unit)
+        xp = questXPCache[questID]
     end
+    if type(xp) ~= "number" or xp <= 0 then return nil end
+    return string.format("%dxp", xp)
+end
+
+local function GetDistanceString(questID)
+    local distanceText
+    if addonTable.db.showQuestDistance then
+        local distSq = C_QuestLog.GetDistanceSqToQuest(questID)
+        if distSq and distSq >= 0 then
+            local dist = math.sqrt(distSq)
+            local unit = "yds"
+            if useMetric then
+                dist = dist * 0.9144; unit = "m"
+            end
+            if dist >= 1000 then
+                distanceText = string.format("(%.1fk %s)", dist / 1000, unit)
+            else
+                distanceText = string.format("(%d %s)", dist, unit)
+            end
+        end
+    end
+    local xpText = GetQuestXPText(questID)
+    if distanceText and xpText then return " |cFFAAAAAA" .. distanceText .. " - " .. xpText .. "|r" end
+    if distanceText or xpText then return " |cFFAAAAAA" .. (distanceText or xpText) .. "|r" end
+    return ""
 end
 
 local questLineCache = {}

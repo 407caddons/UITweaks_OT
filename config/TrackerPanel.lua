@@ -298,6 +298,17 @@ function addonTable.ConfigSetup.Tracker(panel, tab, configWindow)
         UpdateTracker()
     end)
 
+    local showXPCheckbox = CreateFrame("CheckButton", "UIThingsTrackerShowXPCheckbox", panel,
+        "ChatConfigCheckButtonTemplate")
+    showXPCheckbox:SetPoint("TOPLEFT", 300, -364)
+    showXPCheckbox:SetHitRectInsets(0, -130, 0, 0)
+    SetCheckButtonLabel(showXPCheckbox, "Show XP on Quests")
+    showXPCheckbox:SetChecked(addonTable.db.showQuestXP)
+    showXPCheckbox:SetScript("OnClick", function(self)
+        addonTable.db.showQuestXP = self:GetChecked()
+        UpdateTracker()
+    end)
+
     local questDistCheckbox = CreateFrame("CheckButton", "UIThingsTrackerQuestDistCheckbox", panel,
         "ChatConfigCheckButtonTemplate")
     questDistCheckbox:SetPoint("TOPLEFT", 20, -396)
